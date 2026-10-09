@@ -20,8 +20,9 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
         center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
     }
 
-    /// `key` makes repeats of the same news replace each other instead of piling up.
-    func notify(drive id: String, key: String, title: String, body: String) {
+    /// `key` makes repeats of the same news replace each other instead of piling up. Clicking opens
+    /// `url` when given (a pull request), otherwise the drive's folder.
+    func notify(drive id: String, key: String, title: String, body: String, url: URL? = nil) {
         guard Self.available else { return }
         let content = UNMutableNotificationContent()
         content.title = title
@@ -29,14 +30,17 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
         content.sound = .default
         content.threadIdentifier = id
         content.userInfo = ["drive": id]
+        if let url { content.userInfo["url"] = url.absoluteString }
         UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: key, content: content, trigger: nil))
     }
 
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
                                 withCompletionHandler completionHandler: @escaping () -> Void) {
-        let id = response.notification.request.content.userInfo["drive"] as? String
+        let info = response.notification.request.content.userInfo
+        let id = info["drive"] as? String
+        let url = (info["url"] as? String).flatMap { URL(string: $0) }
         DispatchQueue.main.async {
-            if let id { self.onOpen?(id) }
+            if let url { NSWorkspace.shared.open(url) } else if let id { self.onOpen?(id) }
             completionHandler()
         }
     }

@@ -26,6 +26,8 @@ final class AppModel: ObservableObject {
     @Published var message: String?
     @Published var busy: Set<String> = []
     @Published var plugged: [PluggedDrive] = []
+    /// The pull request for a drive whose branch is protected (I9), once Gitstick has opened it.
+    @Published var pullRequests: [String: URL] = [:]
 
     let tokens: TokenProvider
     let manager: DriveManager
@@ -57,6 +59,16 @@ final class AppModel: ObservableObject {
         }
         manager.onLocalState = { [weak self] id, state in
             Task { @MainActor in self?.local[id] = state }
+        }
+        manager.onPullRequest = { [weak self] id, url in
+            Task { @MainActor in
+                guard let self else { return }
+                self.pullRequests[id] = url
+                self.announce("pr:\(id):\(url.absoluteString)", drive: id,
+                              title: "Pull request opened for “\(self.driveName(id))”",
+                              body: "Its branch is protected, so your changes are waiting in a pull request. Click to review and merge it.",
+                              url: url)
+            }
         }
         plugged = manager.drives
         manager.startAll()
@@ -135,6 +147,7 @@ final class AppModel: ObservableObject {
                 self.busy.remove(id)
                 self.plugged = manager.drives
                 self.statuses[id] = nil
+                self.pullRequests[id] = nil
                 if let report, case .error(let e) = report.status {
                     self.message = "Ejected, but the last sync failed: \(e). Files are still in the folder."
                 }
@@ -262,17 +275,17 @@ final class AppModel: ObservableObject {
         switch status {
         case .divertedTo(let branch):
             announce("diverted:\(id):\(branch)", drive: id, title: "“\(name)” is protected on GitHub",
-                     body: "Your changes are safe on the branch “\(branch)”. Open a pull request on GitHub to bring them in.")
+                     body: "Your changes are safe on the branch “\(branch)”. Gitstick is opening a pull request to bring them in.")
         case .error(let why):
             announce("error:\(id):\(why)", drive: id, title: "“\(name)” isn't syncing", body: why)
         default: break
         }
     }
 
-    private func announce(_ key: String, drive id: String, title: String, body: String) {
+    private func announce(_ key: String, drive id: String, title: String, body: String, url: URL? = nil) {
         guard !announced.contains(key) else { return }
         announced.insert(key)
-        notifier.notify(drive: id, key: key, title: title, body: body)
+        notifier.notify(drive: id, key: key, title: title, body: body, url: url)
     }
 
     func dismissAttention(_ attentionID: String, for id: String) {

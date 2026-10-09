@@ -249,6 +249,16 @@ struct PluggedRow: View {
                 .padding(.leading, 16)
             }
 
+            // Protected branch: the work is on a side branch, and in a pull request once Gitstick opened one.
+            if case .divertedTo? = status, let pr = model.pullRequests[drive.fullName] {
+                HStack(spacing: 8) {
+                    Button("Open Pull Request") { NSWorkspace.shared.open(pr) }
+                    Spacer()
+                }
+                .controlSize(.small)
+                .padding(.leading, 16)
+            }
+
             // What needs you: held-back files (until they're gone) and conflict copies (until dismissed).
             ForEach(model.attention[drive.fullName] ?? []) { a in
                 HStack(spacing: 4) {

@@ -64,9 +64,9 @@ public final class DriveSession {
     private var timer: DispatchSourceTimer?
     public var pollInterval: TimeInterval = 60
 
-    init(drive: PluggedDrive, git: Git) {
+    init(drive: PluggedDrive, git: Git, deviceName: String = RepoSyncer.defaultDeviceName) {
         self.drive = drive
-        self.syncer = RepoSyncer(git: git, mode: drive.mode)
+        self.syncer = RepoSyncer(git: git, mode: drive.mode, deviceName: deviceName)
         self.syncer.pullPolicy = drive.pullPolicy
         self.watcher = makeWatcher(for: drive.url)
         self.syncSoon = Debouncer(quiet: 3, maxWait: 30) { [weak self] in self?.syncer.requestSync() }
@@ -149,6 +149,15 @@ public final class DriveManager: @unchecked Sendable {
     public var onStatus: ((String, SyncStatus) -> Void)?
     public var onReport: ((String, SyncReport) -> Void)?
     public var onLocalState: ((String, LocalState) -> Void)?
+    /// A pull request exists for a drive's diverted work (I9): the drive and the PR's page. Called
+    /// after every push to the side branch, with the same URL as long as that PR is open.
+    public var onPullRequest: ((String, URL) -> Void)?
+
+    /// Talks to GitHub for the things git can't do: here, opening pull requests.
+    public var catalog: GitHubCatalog
+    /// This Mac's name, as the side branch (`gitstick/<name>`), conflict copies and the pull request
+    /// carry it. Read when a session starts.
+    public var deviceName = RepoSyncer.defaultDeviceName
 
     private let storeURL: URL
     private let identityURL: URL
@@ -163,6 +172,7 @@ public final class DriveManager: @unchecked Sendable {
         self.storeURL = state.appendingPathComponent("drives.json")
         self.identityURL = state.appendingPathComponent("identity.json")
         self.tokens = tokens
+        self.catalog = GitHubCatalog(tokens: tokens)
         load()
     }
 
@@ -247,6 +257,7 @@ public final class DriveManager: @unchecked Sendable {
         sessions[fullName] = nil
         lock.lock()
         drives.removeAll { $0.fullName == fullName }
+        pullRequests[fullName] = nil
         save()
         lock.unlock()
 
@@ -314,13 +325,61 @@ public final class DriveManager: @unchecked Sendable {
             }
         }
         let git = Git(repo: drive.url, credentials: tokens, identityProvider: provider)
-        let session = DriveSession(drive: drive, git: git)
+        let session = DriveSession(drive: drive, git: git, deviceName: deviceName)
         let id = drive.fullName
         session.syncer.onStatus = { [weak self] s in self?.onStatus?(id, s) }
-        session.syncer.onReport = { [weak self] r in self?.onReport?(id, r) }
+        session.syncer.onReport = { [weak self] r in
+            self?.onReport?(id, r)
+            if case .divertedTo(let side) = r.status, r.pushed { self?.ensurePullRequest(for: drive, side: side) }
+        }
         session.syncer.onLocalState = { [weak self] l in self?.onLocalState?(id, l) }
         sessions[id] = session
         session.start()
+    }
+
+    // MARK: Pull requests for diverted work (I9)
+
+    /// Commits ("<drive>@<sha>") a pull request was looked up for, so a side branch that is
+    /// re-pushed every minute costs one API call per new commit, not per cycle.
+    private var pullRequestChecked: Set<String> = []
+    private var pullRequests: [String: URL] = [:]
+
+    /// The pull request page for a drive's diverted work, once known.
+    public func pullRequest(for fullName: String) -> URL? {
+        lock.lock(); defer { lock.unlock() }
+        return pullRequests[fullName]
+    }
+
+    /// The branch is protected and the work went to `side` (I9). Make sure a pull request exists for
+    /// it, so the person with the rights can bring it in without first finding the branch. Runs in
+    /// the background; a failure (offline, no token) is retried after the next push to the branch.
+    private func ensurePullRequest(for drive: PluggedDrive, side: String) {
+        let git = Git(repo: drive.url)
+        guard let sha = git.value(["rev-parse", "HEAD"]), let base = git.value(["symbolic-ref", "--short", "-q", "HEAD"]) else { return }
+        let key = "\(drive.fullName)@\(sha)"
+        lock.lock()
+        let seen = pullRequestChecked.contains(key)
+        pullRequestChecked.insert(key)
+        lock.unlock()
+        guard !seen else { return }
+
+        let catalog = self.catalog, device = self.deviceName, id = drive.fullName
+        let title = "Changes from \(device)"
+        let body = """
+            `\(base)` is protected, so Gitstick put the changes made on \(device) on `\(side)` instead.
+            Merge this to bring them into `\(base)`. Until then, new changes from that Mac keep landing here.
+            """
+        Task { [weak self] in
+            do {
+                guard let url = try await catalog.pullRequest(repo: id, head: side, base: base, title: title, body: body) else { return }
+                guard let self else { return }
+                self.lock.lock(); self.pullRequests[id] = url; self.lock.unlock()
+                self.onPullRequest?(id, url)
+            } catch {
+                guard let self else { return }
+                self.lock.lock(); self.pullRequestChecked.remove(key); self.lock.unlock()   // try again next push
+            }
+        }
     }
 
     static func sameRepo(_ a: String, _ b: String) -> Bool {

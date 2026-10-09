@@ -89,7 +89,7 @@ Held-back files stay on disk, untouched, and are reported on every cycle. Junk (
 
 **I8 — A failed cycle leaves the tree as it found it.** If integration fails partway through, the merge is aborted. The next cycle starts clean; your files are still in the commit from I1.
 
-**I9 — Protected means divert, not fail.** If a push is refused by branch protection, the work is pushed to `gitstick/<mac-name>` instead and the drive shows *diverted*. Your files are on GitHub and nobody's rules were broken. (A later version can open the pull request automatically.)
+**I9 — Protected means divert, not fail.** If a push is refused by branch protection, the work is pushed to `gitstick/<mac-name>` instead and the drive shows *diverted*. Your files are on GitHub and nobody's rules were broken. Then Gitstick opens a pull request from that branch (or finds the one already open), so the person with the rights can review and merge without first hunting for the branch; the drive's row gets an **Open Pull Request** button and you get one notification. New commits keep landing on the same branch, and so in the same pull request, until it's merged.
 
 **I10 — Manual means hands off your work.** In manual mode Gitstick never creates a commit on its own, never changes your index, and only merges when git can do so without touching a single uncommitted file. When that isn't possible, the drive shows *waiting* ("2 changes on GitHub touch notes.md — commit to pull") until you commit, and then the ordinary keep-both rules apply. Two mechanisms enforce this. First, git's own refusal to overwrite local changes is treated as a clean "not yet," never as an error or a reason to stash. Second, Gitstick never merges over a non-empty index, because conflict resolution commits the index and would otherwise swallow what you staged.
 
@@ -108,7 +108,7 @@ Held-back files stay on disk, untouched, and are reported on every cycle. Junk (
 | `CommitMessage.swift` | Deterministic messages from `--name-status`. |
 | `Watcher.swift` | FSEvents watcher (macOS) and polling watcher (elsewhere), both reporting *file edited* vs *HEAD moved*; debouncer. |
 | `DriveManager.swift` | Plug in (partial clone, `--filter=blob:none`), eject (final sync), per-drive mode, persistence. |
-| `GitHub.swift` | Token sources, and listing PCs and drives from the API. |
+| `GitHub.swift` | Token sources, listing PCs and drives from the API, and the pull request for diverted work (I9). |
 
 ## Known gaps
 

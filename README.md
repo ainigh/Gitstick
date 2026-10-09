@@ -6,6 +6,7 @@ Your GitHub repos as drives in the Mac menubar. Plug one in, drop files in the f
 - **Drives** are repos. Plugging one in creates `~/Gitstick/<pc>/<drive>`, a normal folder that works in Finder, VS Code, and everything else.
 - **Conflicts** never block you: both versions are kept, side by side.
 - **Secrets, huge files, and folders that are repos of their own** are held back and flagged, never pushed.
+- **Protected branches don't stop you.** Your work goes to a `gitstick/<mac>` branch and Gitstick opens the pull request for it.
 - **You hear about what needs you.** A conflict copy, a held-back file, a protected branch: one notification each, and the item stays in the menu until it's resolved or dismissed. (Notifications and Launch at Login need the bundled `.app`.)
 - **Ask before pulling** (optional, per drive). Outgoing stays automatic; incoming shows you what GitHub wants to change in your folder, and you click **Accept** or **Not Now**.
 - **Three modes per drive.** *Auto*: drop and go. *Manual*: you commit (or click **Commit & Sync**), and Gitstick pulls when it's safe and pushes your commits. *Paused*: hands off.
@@ -64,11 +65,10 @@ swift run gitstick status ~/code/x            # uncommitted / to push / to pull,
 swift test
 ```
 
-The tests simulate two Macs sharing one "GitHub" (a bare repo on disk) and check the invariants: drop-and-go, keep-both conflicts (text, binary, file-vs-folder, executable bits), edit-beats-delete, independent changes merging, the Gatekeeper (secrets, nested repos), backing off during a manual merge, waiting out a transient `index.lock`, retrying when someone else pushes first, diverting from a protected branch, joining two first commits into an empty repo, request coalescing, and manual mode's promises (never commits on its own, never touches your index, waits instead of overwriting your uncommitted work, honors your staging on Commit & Sync). The engine and tests also build on Linux; CI runs them on every push, builds the app on macOS, and on `main` publishes the release (`.github/workflows/ci.yml`).
+The tests simulate two Macs sharing one "GitHub" (a bare repo on disk) and check the invariants: drop-and-go, keep-both conflicts (text, binary, file-vs-folder, executable bits), edit-beats-delete, independent changes merging, the Gatekeeper (secrets, nested repos), backing off during a manual merge, waiting out a transient `index.lock`, retrying when someone else pushes first, diverting from a protected branch and opening its pull request, going offline without drama, joining two first commits into an empty repo, request coalescing, and manual mode's promises (never commits on its own, never touches your index, waits instead of overwriting your uncommitted work, honors your staging on Commit & Sync). The engine and tests also build on Linux; CI runs them on every push, builds the app on macOS, and on `main` publishes the release (`.github/workflows/ci.yml`).
 
 ## Roadmap ideas
 
 - Sign in with GitHub's OAuth device flow instead of pasting a token
-- Auto-open a pull request when a protected branch diverts work
 - Git LFS for large files
 - "Format new drive" (create a repo) and branch picker

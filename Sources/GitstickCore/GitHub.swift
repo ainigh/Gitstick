@@ -97,12 +97,37 @@ public enum GitHubError: Error, CustomStringConvertible {
     }
 }
 
-/// Lists the "PCs" and "drives" for the signed-in user.
+/// Lists the "PCs" and "drives" for the signed-in user, and opens pull requests for diverted work.
 public struct GitHubCatalog: Sendable {
+    public typealias Transport = @Sendable (URLRequest) async throws -> (Data, URLResponse)
+
     public let tokens: TokenProvider
     public var api = URL(string: "https://api.github.com")!
+    /// How requests reach GitHub. Replaceable, so the API client can be tested without a network.
+    public var transport: Transport = { try await URLSession.shared.bytes(of: $0) }
 
     public init(tokens: TokenProvider) { self.tokens = tokens }
+
+    /// The open pull request from `head` into `base`, opened now if there isn't one. Returns its
+    /// page, or nil when GitHub refuses to open one (nothing to merge: the branches are equal).
+    public func pullRequest(repo: String, head: String, base: String, title: String, body: String) async throws -> URL? {
+        struct PR: Decodable { let html_url: URL }
+        let owner = repo.split(separator: "/").first.map(String.init) ?? ""
+        var query = URLComponents()
+        query.path = "/repos/\(repo)/pulls"
+        query.queryItems = [.init(name: "state", value: "open"), .init(name: "head", value: "\(owner):\(head)"),
+                            .init(name: "base", value: base), .init(name: "per_page", value: "1")]
+        if let page = try await get(query.string ?? query.path).first,
+           let existing = try JSONDecoder().decode([PR].self, from: page).first {
+            return existing.html_url
+        }
+        do {
+            let created = try await post("/repos/\(repo)/pulls", json: ["title": title, "head": head, "base": base, "body": body])
+            return try JSONDecoder().decode(PR.self, from: created).html_url
+        } catch GitHubError.http(422, _) {
+            return nil      // "No commits between base and head" (or a race: it exists now; next time finds it)
+        }
+    }
 
     public func me() async throws -> GitHubUser {
         try JSONDecoder().decode(GitHubUser.self, from: try await get("/user").first!)
@@ -144,24 +169,41 @@ public struct GitHubCatalog: Sendable {
 
     /// GET with pagination via the Link header. Returns one Data per page.
     func get(_ path: String) async throws -> [Data] {
-        guard let token = tokens.token() else { throw GitHubError.notSignedIn }
         var pages: [Data] = []
         var next: URL? = URL(string: path, relativeTo: api)
         while let url = next, pages.count < 20 {
-            var req = URLRequest(url: url)
-            req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-            req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
-            req.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
-            let (data, resp) = try await URLSession.shared.bytes(of: req)
-            let http = resp as? HTTPURLResponse
-            guard let code = http?.statusCode, (200..<300).contains(code) else {
-                if http?.statusCode == 401 { tokens.invalidate(); throw GitHubError.notSignedIn }
-                throw GitHubError.http(http?.statusCode ?? -1, String(decoding: data, as: UTF8.self))
-            }
+            let (data, http) = try await send(request(url))
             pages.append(data)
-            next = Self.nextLink(http?.value(forHTTPHeaderField: "Link"))
+            next = Self.nextLink(http.value(forHTTPHeaderField: "Link"))
         }
         return pages
+    }
+
+    func post(_ path: String, json: [String: String]) async throws -> Data {
+        var req = try request(URL(string: path, relativeTo: api)!)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONEncoder().encode(json)
+        return try await send(req).0
+    }
+
+    private func request(_ url: URL) throws -> URLRequest {
+        guard let token = tokens.token() else { throw GitHubError.notSignedIn }
+        var req = URLRequest(url: url)
+        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        req.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
+        return req
+    }
+
+    private func send(_ req: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        let (data, resp) = try await transport(req)
+        let http = resp as? HTTPURLResponse
+        guard let http, (200..<300).contains(http.statusCode) else {
+            if http?.statusCode == 401 { tokens.invalidate(); throw GitHubError.notSignedIn }
+            throw GitHubError.http(http?.statusCode ?? -1, String(decoding: data, as: UTF8.self))
+        }
+        return (data, http)
     }
 
     static func nextLink(_ header: String?) -> URL? {
