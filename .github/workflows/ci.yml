@@ -1,9 +1,15 @@
 name: CI
 
+# Every push: test the engine on Linux, build and test everything on macOS. A push to main also
+# publishes the app as a GitHub release, which is what the app's updater and install.sh download.
 on:
   push:
     branches: ["**"]
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   engine-linux:
@@ -28,3 +34,23 @@ jobs:
         run: swift build
       - name: Test
         run: swift test
+      - name: Package the app
+        run: |
+          echo "VERSION=0.3.${{ github.run_number }}" >> "$GITHUB_ENV"
+          VERSION="0.3.${{ github.run_number }}" COMMIT="$GITHUB_SHA" UNIVERSAL=1 ./Scripts/make-app.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Gitstick
+          path: dist/Gitstick.zip
+      - name: Release
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # A re-run keeps its run number, so the release may already exist: replace its zip.
+        run: |
+          if gh release view "v$VERSION" >/dev/null 2>&1; then
+            gh release upload "v$VERSION" dist/Gitstick.zip --clobber
+          else
+            gh release create "v$VERSION" dist/Gitstick.zip --target "$GITHUB_SHA" \
+              --title "Gitstick $VERSION" --notes "$(git log -1 --format=%B)"
+          fi
