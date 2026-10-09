@@ -1,6 +1,17 @@
 import AppKit
+import ServiceManagement
 import SwiftUI
 import GitstickCore
+
+/// Something in a drive that you should know about. Stays in the menu until it's resolved or dismissed,
+/// unlike a cycle's report, which the next (quiet) cycle replaces.
+struct Attention: Identifiable, Equatable {
+    enum Kind { case conflict, heldBack }
+    let id: String
+    let kind: Kind
+    let path: String
+    let text: String
+}
 
 @MainActor
 final class AppModel: ObservableObject {
@@ -8,6 +19,7 @@ final class AppModel: ObservableObject {
     @Published var statuses: [String: SyncStatus] = [:]
     @Published var reports: [String: SyncReport] = [:]
     @Published var local: [String: LocalState] = [:]
+    @Published var attention: [String: [Attention]] = [:]
     @Published var signedInAs: String?
     @Published var loading = false
     @Published var message: String?
@@ -16,19 +28,25 @@ final class AppModel: ObservableObject {
 
     let tokens: TokenProvider
     let manager: DriveManager
+    let notifier = Notifier()
     private var catalog: GitHubCatalog { GitHubCatalog(tokens: tokens) }
 
     init() {
         tokens = TokenProvider(explicit: { Keychain.read() })
         manager = DriveManager(tokens: tokens)
+        notifier.onOpen = { [weak self] id in Task { @MainActor in self?.reveal(id) } }
         manager.onStatus = { [weak self] id, status in
             Task { @MainActor in
                 self?.statuses[id] = status
                 if case .incoming(let changes) = status { self?.promptIfNew(changes, for: id) }
+                self?.notifyIfNeeded(status, for: id)
             }
         }
         manager.onReport = { [weak self] id, report in
-            Task { @MainActor in self?.reports[id] = report }
+            Task { @MainActor in
+                self?.reports[id] = report
+                self?.noteAttention(from: report, for: id)
+            }
         }
         manager.onLocalState = { [weak self] id, state in
             Task { @MainActor in self?.local[id] = state }
@@ -183,6 +201,84 @@ final class AppModel: ObservableObject {
         manager.setMode(mode, for: id)
         plugged = manager.drives
         reports[id] = nil
+    }
+
+    // MARK: What needs you
+
+    /// Notified once per piece of news, so a held-back file isn't announced again every minute.
+    private var announced: Set<String> = []
+
+    private func driveName(_ id: String) -> String { plugged.first(where: { $0.fullName == id })?.name ?? id }
+
+    private func noteAttention(from report: SyncReport, for id: String) {
+        var items = attention[id] ?? []
+        let name = driveName(id)
+
+        // Held-back files are re-reported on every cycle, so the report is the truth: replace.
+        let held = report.heldBack.map {
+            Attention(id: "held:\($0.path)", kind: .heldBack, path: $0.path,
+                      text: "✋ \($0.path) not synced: \($0.reason.description)")
+        }
+        let heldBefore = Set(items.filter { $0.kind == .heldBack }.map(\.id))
+        items.removeAll { $0.kind == .heldBack }
+        items.append(contentsOf: held)
+        for h in report.heldBack where !heldBefore.contains("held:\(h.path)") {
+            announce("held:\(id):\(h.path)", drive: id, title: "\(h.path) stays on this Mac",
+                     body: "It \(h.reason.description), so Gitstick didn't put it on GitHub. Everything else in “\(name)” synced.")
+        }
+
+        // A conflict copy is news once; it stays listed until you dismiss it.
+        for copy in report.conflictCopies where !items.contains(where: { $0.id == "conflict:\(copy)" }) {
+            let copyName = (copy as NSString).lastPathComponent
+            items.append(Attention(id: "conflict:\(copy)", kind: .conflict, path: copy, text: "⚠︎ Kept both versions: \(copyName)"))
+            announce("conflict:\(id):\(copy)", drive: id, title: "Kept both versions in “\(name)”",
+                     body: "A file changed here and on GitHub. GitHub's keeps the name; yours is saved as “\(copyName)”.")
+        }
+        attention[id] = items
+    }
+
+    private func notifyIfNeeded(_ status: SyncStatus, for id: String) {
+        let name = driveName(id)
+        switch status {
+        case .divertedTo(let branch):
+            announce("diverted:\(id):\(branch)", drive: id, title: "“\(name)” is protected on GitHub",
+                     body: "Your changes are safe on the branch “\(branch)”. Open a pull request on GitHub to bring them in.")
+        case .error(let why) where !why.hasPrefix("Offline"):
+            announce("error:\(id):\(why)", drive: id, title: "“\(name)” isn't syncing", body: why)
+        default: break
+        }
+    }
+
+    private func announce(_ key: String, drive id: String, title: String, body: String) {
+        guard !announced.contains(key) else { return }
+        announced.insert(key)
+        notifier.notify(drive: id, key: key, title: title, body: body)
+    }
+
+    func dismissAttention(_ attentionID: String, for id: String) {
+        attention[id]?.removeAll { $0.id == attentionID }
+    }
+
+    /// Shows the file (a conflict copy, a held-back file) in Finder.
+    func reveal(_ id: String, path: String) {
+        guard let d = plugged.first(where: { $0.fullName == id }) else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([d.url.appendingPathComponent(path)])
+    }
+
+    // MARK: Launch at login
+
+    /// Only a bundled .app can register itself (see Scripts/make-app.sh); `swift run` can't.
+    static let canLaunchAtLogin = Bundle.main.bundleIdentifier != nil
+
+    var launchAtLogin: Bool { Self.canLaunchAtLogin && SMAppService.mainApp.status == .enabled }
+
+    func setLaunchAtLogin(_ on: Bool) {
+        do {
+            if on { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
+        } catch {
+            message = "Couldn't change Launch at Login: \(error.localizedDescription)"
+        }
+        objectWillChange.send()
     }
 
     func reveal(_ id: String) {

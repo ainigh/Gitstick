@@ -6,6 +6,7 @@ Your GitHub repos as drives in the Mac menubar. Plug one in, drop files in the f
 - **Drives** are repos. Plugging one in creates `~/Gitstick/<pc>/<drive>`, a normal folder that works in Finder, VS Code, and everything else.
 - **Conflicts** never block you: both versions are kept, side by side.
 - **Secrets, huge files, and folders that are repos of their own** are held back and flagged, never pushed.
+- **You hear about what needs you.** A conflict copy, a held-back file, a protected branch: one notification each, and the item stays in the menu until it's resolved or dismissed. (Notifications and Launch at Login need the bundled `.app`.)
 - **Ask before pulling** (optional, per drive). Outgoing stays automatic; incoming shows you what GitHub wants to change in your folder, and you click **Accept** or **Not Now**.
 - **Three modes per drive.** *Auto*: drop and go. *Manual*: you commit (or click **Commit & Sync**), and Gitstick pulls when it's safe and pushes your commits. *Paused*: hands off.
 
@@ -53,8 +54,6 @@ The tests simulate two Macs sharing one "GitHub" (a bare repo on disk) and check
 ## Roadmap ideas
 
 - Sign in with GitHub's OAuth device flow instead of pasting a token
-- Notifications for conflicts and held-back files (needs the bundled .app)
 - Auto-open a pull request when a protected branch diverts work
-- Launch at login (`SMAppService`)
 - Git LFS for large files
 - "Format new drive" (create a repo) and branch picker
