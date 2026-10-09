@@ -5,7 +5,7 @@ Your GitHub repos as drives in the Mac menubar. Plug one in, drop files in the f
 - **PCs** are your GitHub account and organizations.
 - **Drives** are repos. Plugging one in creates `~/Gitstick/<pc>/<drive>`, a normal folder that works in Finder, VS Code, and everything else.
 - **Conflicts** never block you: both versions are kept, side by side.
-- **Secrets and huge files** are held back and flagged, never pushed.
+- **Secrets, huge files, and folders that are repos of their own** are held back and flagged, never pushed.
 - **Three modes per drive.** *Auto*: drop and go. *Manual*: you commit (or click **Commit & Sync**), and Gitstick pulls when it's safe and pushes your commits. *Paused*: hands off.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for how the engine works and the rules it never breaks.
@@ -45,7 +45,7 @@ swift run gitstick status ~/code/x            # uncommitted / to push / to pull,
 swift test
 ```
 
-The tests simulate two Macs sharing one "GitHub" (a bare repo on disk) and check the invariants: drop-and-go, keep-both conflicts, edit-beats-delete, independent changes merging, the Gatekeeper, backing off during a manual merge, retrying when someone else pushes first, and manual mode's promises (never commits on its own, never touches your index, waits instead of overwriting your uncommitted work, honors your staging on Commit & Sync). The engine and tests also build on Linux, so they can run in CI.
+The tests simulate two Macs sharing one "GitHub" (a bare repo on disk) and check the invariants: drop-and-go, keep-both conflicts (text, binary, file-vs-folder, executable bits), edit-beats-delete, independent changes merging, the Gatekeeper (secrets, nested repos), backing off during a manual merge, waiting out a transient `index.lock`, retrying when someone else pushes first, diverting from a protected branch, joining two first commits into an empty repo, request coalescing, and manual mode's promises (never commits on its own, never touches your index, waits instead of overwriting your uncommitted work, honors your staging on Commit & Sync). The engine and tests also build on Linux; CI runs them on every push (`.github/workflows/ci.yml`).
 
 ## Roadmap ideas
 

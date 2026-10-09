@@ -61,20 +61,21 @@ These are what the tests check. Each one exists because breaking it either loses
 
 **I1 — Commit before integrate.** Whatever Gitstick commits is committed before a merge can touch the working tree. A commit is the only state Git guarantees it can always get back to, so once your file is in a commit, nothing downstream can destroy it. *Consequence:* no stash, no `pull --autostash`, no rebase of local work.
 
-**I2 — No byte is lost in a conflict.** When both sides changed a file, the remote version keeps the original name and the local version is saved next to it as `name (conflict from <Mac> <date>).ext`. Both are committed. When one side edited and the other deleted, the edit wins (a delete is cheap to redo, and it's still in history). Gitstick never picks a loser, so it never needs to ask.
+**I2 — No byte is lost in a conflict.** When both sides changed a file, the remote version keeps the original name and the local version is saved next to it as `name (conflict from <Mac> <date>).ext`. Both are committed. When one side edited and the other deleted, the edit wins (a delete is cheap to redo, and it's still in history). When one side made `name` a file and the other a folder, the folder stays and the file becomes a conflict copy (`(conflict from <Mac> …)` if it was ours, `(conflict from GitHub …)` if it came from the remote). Gitstick never picks a loser, so it never needs to ask.
 
 > Why the remote keeps the name: collaborators who didn't touch anything see no surprise; the person whose Mac had the conflict is the one who gets the visible copy, and they're the one with context to reconcile it.
 
 **I3 — Never rewrite published history.** No force-push, no rebase, no amend of anything that has left the Mac. Merge commits make the history a little noisier; force-push would make it wrong.
 
-**I4 — Never prompt.** Every git call runs with terminal prompts, editors, and askpass disabled. Commit messages are generated (`Add index.html`, `Add 2 files, update style.css`, with the full path list in the body). Merge messages are generated. Credentials come from the Keychain, `$GITHUB_TOKEN`, or the GitHub CLI, and are passed as a per-command header, so nothing is written to `.git/config`.
+**I4 — Never prompt.** Every git call runs with terminal prompts, editors, and askpass disabled. Commit messages are generated (`Add index.html`, `Add 2 files, update style.css`, with the full path list in the body). Merge messages are generated. Credentials come from the Keychain, `$GITHUB_TOKEN`, or the GitHub CLI, and are passed as a per-command header through the environment (`GIT_CONFIG_COUNT`), so nothing is written to `.git/config` and the token never appears in the process list.
 
-**I5 — Back off from humans.** See step 1 of the cycle. If you start a rebase in the terminal, Gitstick waits for you to finish rather than committing into the middle of it.
+**I5 — Back off from humans.** See step 1 of the cycle. If you start a rebase in the terminal, Gitstick waits for you to finish rather than committing into the middle of it. A bare `index.lock` is given two seconds to disappear first: VS Code's background `git status` and a quick `git add` hold it for a moment, and that is not someone at work.
 
 **I6 — When in doubt, hold back.** A wrong auto-commit is permanent and possibly public; a held-back file is a yellow line in the menu. The Gatekeeper refuses:
 - secret-looking files by name (`.env`, `id_rsa`, `*.pem`, `*.p12` …)
 - secret-looking content (private keys, GitHub/AWS/Slack/Stripe/Anthropic tokens)
 - files over 50 MB (GitHub's warning threshold; the hard rejection is at 100 MB)
+- folders that are a git repository of their own (a dragged-in project with its `.git`): git would commit them as an empty pointer, and every other Mac would see an empty folder
 
 Held-back files stay on disk, untouched, and are reported on every cycle. Junk (`.DS_Store`, editor swap files, Office lock files, `node_modules/`) is excluded via `.git/info/exclude`, which is local-only, so Gitstick never edits the repo's own `.gitignore` behind your back.
 
@@ -107,6 +108,7 @@ Held-back files stay on disk, untouched, and are reported on every cycle. Junk (
 - **Manual mode doesn't watch the network for you.** "N to pull" reflects the last fetch, which happens every 60 s and after each of your commits.
 - **Large files** are held back rather than sent through Git LFS.
 - **Rename/rename conflicts** fall back to keeping whichever side Git staged.
+- **Nested repositories** are held back, not synced. Delete the inner `.git` (or make it a submodule yourself) to sync its files.
 - **No virtual filesystem.** Drives are real folders (full working tree, with history fetched lazily). That keeps every app compatible. A File Provider extension for lazy file contents is a possible later layer on top of this engine, not a replacement.
 
 Closed in 0.2: *staging is owned by Gitstick* (now only in auto mode) and *held-back files block a pull with an error* (now a harmless *waiting*).

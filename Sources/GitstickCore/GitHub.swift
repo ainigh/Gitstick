@@ -138,7 +138,7 @@ public struct GitHubCatalog: Sendable {
             req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
             req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
             req.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
-            let (data, resp) = try await URLSession.shared.data(for: req)
+            let (data, resp) = try await URLSession.shared.bytes(of: req)
             let http = resp as? HTTPURLResponse
             guard let code = http?.statusCode, (200..<300).contains(code) else {
                 if http?.statusCode == 401 { tokens.invalidate(); throw GitHubError.notSignedIn }
@@ -158,5 +158,19 @@ public struct GitHubCatalog: Sendable {
             }
         }
         return nil
+    }
+}
+
+extension URLSession {
+    /// `data(for:)` is async-native on Apple platforms but missing from swift-corelibs-foundation
+    /// (Linux), where the engine and tests also build for CI. Same semantics, one code path.
+    func bytes(of request: URLRequest) async throws -> (Data, URLResponse) {
+        try await withCheckedThrowingContinuation { cont in
+            dataTask(with: request) { data, response, error in
+                if let error { cont.resume(throwing: error) }
+                else if let response { cont.resume(returning: (data ?? Data(), response)) }
+                else { cont.resume(throwing: URLError(.badServerResponse)) }
+            }.resume()
+        }
     }
 }
