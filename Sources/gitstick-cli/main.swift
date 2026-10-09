@@ -2,9 +2,11 @@ import Foundation
 import GitstickCore
 
 // Headless front-end to the same engine the menubar app uses.
-//   gitstick sync   [--manual] [path]   one sync cycle
-//   gitstick watch  [--manual] [path]   keep a folder synced until Ctrl-C
+//   gitstick sync   [--manual] [--review] [path]   one sync cycle
+//   gitstick watch  [--manual] [--review] [path]   keep a folder synced until Ctrl-C
 //   gitstick commit [path]              manual mode's "Commit & Sync"
+//   gitstick accept [path]              bring in the changes from GitHub that are waiting for your OK
+//   gitstick decline [path]             hold them off until GitHub moves on
 //   gitstick status [path]              local counts, no network
 //   gitstick pcs                        list your PCs and drives on GitHub
 
@@ -12,7 +14,8 @@ setvbuf(stdout, nil, _IOLBF, 0)
 
 var args = Array(CommandLine.arguments.dropFirst())
 let manual = args.contains("--manual")
-args.removeAll { $0 == "--manual" }
+let review = args.contains("--review")
+args.removeAll { $0 == "--manual" || $0 == "--review" }
 let command = args.first ?? "help"
 let path = URL(fileURLWithPath: args.dropFirst().first ?? FileManager.default.currentDirectoryPath)
 let tokens = TokenProvider()
@@ -33,6 +36,11 @@ func describe(_ r: SyncReport) -> String {
     for c in r.conflictCopies { lines.append("⚠︎ kept both versions → \(c)") }
     for h in r.heldBack { lines.append("✋ held back \(h.path): \(h.reason)") }
     switch r.status {
+    case .incoming(let c):
+        lines.append(c.declined ? "⏸ \(c.commits.count) commit(s) on GitHub held off (run `gitstick accept` to bring them in)"
+                                : "❓ \(c.commits.count) commit(s) on GitHub are waiting for your OK — `gitstick accept` or `gitstick decline`")
+        for commit in c.commits { lines.append("    \(commit.sha) \(commit.author): \(commit.subject)") }
+        for f in c.files { lines.append("    \(f.status) \(f.path)\(c.alsoChangedHere.contains(f.path) ? "   (also changed here — both versions will be kept)" : "")") }
     case .idle: lines.append("● in sync")
     case .syncing: lines.append("… syncing")
     case .paused(let why): lines.append("⏸ paused: \(why)")
@@ -44,11 +52,24 @@ func describe(_ r: SyncReport) -> String {
     return lines.joined(separator: "\n")
 }
 
-func syncer() -> RepoSyncer { RepoSyncer(git: Git(repo: path, credentials: tokens), mode: manual ? .manual : .auto) }
+func syncer() -> RepoSyncer {
+    let s = RepoSyncer(git: Git(repo: path, credentials: tokens), mode: manual ? .manual : .auto)
+    s.pullPolicy = review ? .review : .automatic
+    return s
+}
 
 switch command {
 case "sync":
     print(describe(syncer().syncOnce()))
+
+case "accept", "decline":
+    // Decisions are stored in the repo (.git/gitstick/), so the next `sync --review` honors them.
+    let s = RepoSyncer(git: Git(repo: path, credentials: tokens), mode: manual ? .manual : .auto)
+    s.pullPolicy = .review
+    let r = s.syncOnce()
+    guard case .incoming(let c) = r.status else { print(describe(r)); break }
+    if command == "accept" { s.record(.accepted, c.remoteHead); s.record(.declined, nil) } else { s.record(.declined, c.remoteHead) }
+    print(describe(s.syncOnce()))
 
 case "commit":
     let s = RepoSyncer(git: Git(repo: path, credentials: tokens), mode: .manual)
@@ -86,9 +107,11 @@ case "pcs":
 
 default:
     print("""
-    gitstick sync   [--manual] [path]   run one sync cycle on a repo folder
-    gitstick watch  [--manual] [path]   keep a repo folder synced (Ctrl-C to stop)
+    gitstick sync   [--manual] [--review] [path]   run one sync cycle on a repo folder
+    gitstick watch  [--manual] [--review] [path]   keep a repo folder synced (Ctrl-C to stop)
     gitstick commit [path]              commit (staged, or everything) with a generated message, then sync
+    gitstick accept [path]              bring in the GitHub changes that are waiting for your OK (--review)
+    gitstick decline [path]             hold them off until GitHub moves on
     gitstick status [path]              uncommitted / ahead / behind, no network
     gitstick pcs                        list your GitHub accounts/orgs and their repos
     """)

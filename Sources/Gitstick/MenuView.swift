@@ -138,6 +138,10 @@ struct PluggedRow: View {
                     HStack(spacing: 5) {
                         Text(drive.name).font(.body)
                         if drive.mode != .auto { ModeBadge(mode: drive.mode) }
+                        if drive.pullPolicy == .review {
+                            Image(systemName: "hand.raised").font(.caption2).foregroundStyle(.secondary)
+                                .help("Changes from GitHub wait for your OK")
+                        }
                     }
                     Text("\(drive.owner) · \(status?.label ?? "Starting…")")
                         .font(.caption).foregroundStyle(.secondary).lineLimit(2)
@@ -170,6 +174,18 @@ struct PluggedRow: View {
                 .padding(.leading, 16)
             }
 
+            // Incoming changes waiting for a yes (pull policy: review).
+            if case .incoming(let changes)? = status {
+                HStack(spacing: 8) {
+                    Button("Review…") { model.review(changes, for: drive.fullName) }
+                    Button("Accept") { model.acceptIncoming(changes, for: drive.fullName) }
+                    if !changes.declined { Button("Not Now") { model.declineIncoming(changes, for: drive.fullName) } }
+                    Spacer()
+                }
+                .controlSize(.small)
+                .padding(.leading, 16)
+            }
+
             if let report {
                 ForEach(report.heldBack, id: \.path) { h in
                     Text("✋ \(h.path) not synced: \(h.reason.description)")
@@ -199,6 +215,10 @@ struct PluggedRow: View {
                     Text("\(m.title) — \(m.explanation)").tag(m)
                 }
             }
+            Toggle("Ask Before Pulling", isOn: Binding(
+                get: { drive.pullPolicy == .review },
+                set: { model.setPullPolicy($0 ? .review : .automatic, for: drive.fullName) }
+            ))
             Divider()
             if drive.mode == .manual { Button("Commit & Sync") { model.commitAndSync(drive.fullName) } }
             if drive.mode != .paused { Button("Sync Now") { model.syncNow(drive.fullName) } }

@@ -22,7 +22,10 @@ final class AppModel: ObservableObject {
         tokens = TokenProvider(explicit: { Keychain.read() })
         manager = DriveManager(tokens: tokens)
         manager.onStatus = { [weak self] id, status in
-            Task { @MainActor in self?.statuses[id] = status }
+            Task { @MainActor in
+                self?.statuses[id] = status
+                if case .incoming(let changes) = status { self?.promptIfNew(changes, for: id) }
+            }
         }
         manager.onReport = { [weak self] id, report in
             Task { @MainActor in self?.reports[id] = report }
@@ -104,6 +107,78 @@ final class AppModel: ObservableObject {
     func syncNow(_ id: String) { manager.syncNow(id) }
     func commitAndSync(_ id: String) { manager.commitAndSync(id) }
 
+    // MARK: Reviewing incoming changes
+
+    /// Remote heads we've already popped a dialog for. One question per change on GitHub.
+    private var prompted: Set<String> = []
+
+    func setPullPolicy(_ policy: PullPolicy, for id: String) {
+        manager.setPullPolicy(policy, for: id)
+        plugged = manager.drives
+    }
+
+    func acceptIncoming(_ changes: IncomingChanges, for id: String) { manager.acceptIncoming(changes, for: id) }
+    func declineIncoming(_ changes: IncomingChanges, for id: String) { manager.declineIncoming(changes, for: id) }
+    func reconsiderIncoming(_ id: String) { manager.reconsiderIncoming(id) }
+
+    /// The compare page on GitHub for exactly these changes.
+    func openCompareOnGitHub(_ changes: IncomingChanges, for id: String) {
+        guard let d = plugged.first(where: { $0.fullName == id }),
+              let local = Git(repo: d.url).value(["rev-parse", "HEAD"]),
+              let url = URL(string: "https://github.com/\(id)/compare/\(local)...\(changes.remoteHead)") else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    private func promptIfNew(_ changes: IncomingChanges, for id: String) {
+        let key = "\(id)@\(changes.remoteHead)"
+        guard !changes.declined, !prompted.contains(key) else { return }
+        prompted.insert(key)
+        review(changes, for: id)
+    }
+
+    /// The one dialog in Gitstick: what GitHub wants to put in your folder, and a yes or a no.
+    func review(_ changes: IncomingChanges, for id: String) {
+        let name = plugged.first(where: { $0.fullName == id })?.name ?? id
+        let alert = NSAlert()
+        alert.messageText = "\(changes.commits.count == 1 ? "1 change" : "\(changes.commits.count) changes") on GitHub for “\(name)”"
+        alert.informativeText = Self.describe(changes)
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Accept")
+        alert.addButton(withTitle: "Not Now")
+        alert.addButton(withTitle: "Open on GitHub")
+        NSApp.activate(ignoringOtherApps: true)
+        switch alert.runModal() {
+        case .alertFirstButtonReturn: acceptIncoming(changes, for: id)
+        case .alertSecondButtonReturn: declineIncoming(changes, for: id)
+        default: openCompareOnGitHub(changes, for: id)      // stays pending; the menu keeps the buttons
+        }
+    }
+
+    static func describe(_ changes: IncomingChanges) -> String {
+        var lines: [String] = []
+        for c in changes.commits.prefix(8) { lines.append("• \(c.author): \(c.subject)") }
+        if changes.commits.count > 8 { lines.append("• … and \(changes.commits.count - 8) more") }
+        lines.append("")
+        for f in changes.files.prefix(12) {
+            let verb: String
+            switch f.status {
+            case "A": verb = "adds"
+            case "D": verb = "deletes"
+            case "R": verb = "moves"
+            default: verb = "changes"
+            }
+            lines.append("\(verb) \(f.path)" + (changes.alsoChangedHere.contains(f.path) ? "  ⚠︎ also changed on this Mac" : ""))
+        }
+        if changes.files.count > 12 { lines.append("… and \(changes.files.count - 12) more files") }
+        if !changes.alsoChangedHere.isEmpty {
+            lines.append("")
+            lines.append("Accepting keeps both versions of the ⚠︎ files: GitHub's keeps the name, yours is saved next to it.")
+        }
+        lines.append("")
+        lines.append("Not Now leaves everything as it is. Your own changes keep syncing, and you'll be asked again when GitHub moves on.")
+        return lines.joined(separator: "\n")
+    }
+
     func setMode(_ mode: SyncMode, for id: String) {
         manager.setMode(mode, for: id)
         plugged = manager.drives
@@ -118,7 +193,7 @@ final class AppModel: ObservableObject {
     func openInEditor(_ id: String) {
         guard let d = plugged.first(where: { $0.fullName == id }) else { return }
         if let vscode = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.microsoft.VSCode") {
-            NSWorkspace.shared.open([d.url], withApplicationAt: vscode, configuration: .init())
+            NSWorkspace.shared.open([d.url], withApplicationAt: vscode, configuration: NSWorkspace.OpenConfiguration())
         } else {
             NSWorkspace.shared.open(d.url)
         }
@@ -141,6 +216,9 @@ final class AppModel: ObservableObject {
             return "externaldrive.badge.exclamationmark"
         }
         if all.contains(.syncing) { return "arrow.triangle.2.circlepath" }
+        if all.contains(where: { if case .incoming(let c) = $0 { return !c.declined }; return false }) {
+            return "externaldrive.badge.questionmark"
+        }
         if all.contains(where: {
             switch $0 { case .paused, .waiting: return true; default: return false }
         }) {
@@ -159,6 +237,9 @@ extension SyncStatus {
             f.unitsStyle = .short
             return "Synced \(f.localizedString(for: d, relativeTo: Date()))"
         case .syncing: return "Syncing…"
+        case .incoming(let c):
+            let n = c.commits.count == 1 ? "1 change" : "\(c.commits.count) changes"
+            return c.declined ? "\(n) on GitHub held off" : "\(n) on GitHub waiting for your OK"
         case .paused(let why): return "Paused — \(why)"
         case .waiting(let why): return why
         case .divertedTo(let b): return "Read-only branch — saved to \(b)"
@@ -171,7 +252,7 @@ extension SyncStatus {
         case .idle: return .green
         case .syncing: return .blue
         case .paused: return .gray
-        case .waiting, .divertedTo: return .orange
+        case .waiting, .divertedTo, .incoming: return .orange
         case .error: return .red
         }
     }

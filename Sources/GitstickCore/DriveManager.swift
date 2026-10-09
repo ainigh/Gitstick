@@ -9,15 +9,17 @@ public struct PluggedDrive: Codable, Identifiable, Hashable, Sendable {
     public let cloneURL: String
     public let localPath: String
     public var mode: SyncMode
+    public var pullPolicy: PullPolicy
 
     public var url: URL { URL(fileURLWithPath: localPath) }
 
-    public init(fullName: String, owner: String, name: String, cloneURL: String, localPath: String, mode: SyncMode) {
+    public init(fullName: String, owner: String, name: String, cloneURL: String, localPath: String, mode: SyncMode,
+                pullPolicy: PullPolicy = .automatic) {
         self.fullName = fullName; self.owner = owner; self.name = name
-        self.cloneURL = cloneURL; self.localPath = localPath; self.mode = mode
+        self.cloneURL = cloneURL; self.localPath = localPath; self.mode = mode; self.pullPolicy = pullPolicy
     }
 
-    enum CodingKeys: String, CodingKey { case fullName, owner, name, cloneURL, localPath, mode, autoSync }
+    enum CodingKeys: String, CodingKey { case fullName, owner, name, cloneURL, localPath, mode, autoSync, pullPolicy }
 
     public init(from d: Decoder) throws {
         let c = try d.container(keyedBy: CodingKeys.self)
@@ -26,6 +28,7 @@ public struct PluggedDrive: Codable, Identifiable, Hashable, Sendable {
         name = try c.decode(String.self, forKey: .name)
         cloneURL = try c.decode(String.self, forKey: .cloneURL)
         localPath = try c.decode(String.self, forKey: .localPath)
+        pullPolicy = try c.decodeIfPresent(PullPolicy.self, forKey: .pullPolicy) ?? .automatic
         if let m = try c.decodeIfPresent(SyncMode.self, forKey: .mode) {
             mode = m
         } else {
@@ -39,6 +42,7 @@ public struct PluggedDrive: Codable, Identifiable, Hashable, Sendable {
         try c.encode(fullName, forKey: .fullName); try c.encode(owner, forKey: .owner)
         try c.encode(name, forKey: .name); try c.encode(cloneURL, forKey: .cloneURL)
         try c.encode(localPath, forKey: .localPath); try c.encode(mode, forKey: .mode)
+        try c.encode(pullPolicy, forKey: .pullPolicy)
     }
 }
 
@@ -63,6 +67,7 @@ public final class DriveSession {
     init(drive: PluggedDrive, git: Git) {
         self.drive = drive
         self.syncer = RepoSyncer(git: git, mode: drive.mode)
+        self.syncer.pullPolicy = drive.pullPolicy
         self.watcher = makeWatcher(for: drive.url)
         self.syncSoon = Debouncer(quiet: 3, maxWait: 30) { [weak self] in self?.syncer.requestSync() }
         self.syncPromptly = Debouncer(quiet: 1, maxWait: 5) { [weak self] in self?.syncer.requestSync() }
@@ -227,6 +232,33 @@ public final class DriveManager: @unchecked Sendable {
 
     public func syncNow(_ fullName: String) { sessions[fullName]?.syncNow() }
     public func commitAndSync(_ fullName: String) { sessions[fullName]?.commitAndSync() }
+
+    // MARK: Reviewing incoming changes
+
+    public func acceptIncoming(_ changes: IncomingChanges, for fullName: String) {
+        sessions[fullName]?.syncer.acceptIncoming(changes); sessions[fullName]?.syncNow()
+    }
+    public func declineIncoming(_ changes: IncomingChanges, for fullName: String) {
+        sessions[fullName]?.syncer.declineIncoming(changes); sessions[fullName]?.syncNow()
+    }
+    public func reconsiderIncoming(_ fullName: String) {
+        sessions[fullName]?.syncer.reconsiderIncoming(); sessions[fullName]?.syncNow()
+    }
+
+    /// Switches whether GitHub's changes land on their own or wait for your OK. Persisted; takes
+    /// effect on the next cycle (switching back to automatic also brings in anything held off).
+    public func setPullPolicy(_ policy: PullPolicy, for fullName: String) {
+        lock.lock()
+        guard let i = drives.firstIndex(where: { $0.fullName == fullName }) else { lock.unlock(); return }
+        drives[i].pullPolicy = policy
+        save()
+        lock.unlock()
+        if let s = sessions[fullName] {
+            s.syncer.pullPolicy = policy
+            if policy == .automatic { s.syncer.reconsiderIncoming() }
+            s.syncNow()
+        }
+    }
 
     /// Switches a drive's mode. Takes effect immediately; persisted.
     public func setMode(_ mode: SyncMode, for fullName: String) {

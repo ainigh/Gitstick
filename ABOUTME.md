@@ -6,6 +6,7 @@ Your GitHub repos as drives in the Mac menubar. Plug one in, drop files in the f
 - **Drives** are repos. Plugging one in creates `~/Gitstick/<pc>/<drive>`, a normal folder that works in Finder, VS Code, and everything else.
 - **Conflicts** never block you: both versions are kept, side by side.
 - **Secrets, huge files, and folders that are repos of their own** are held back and flagged, never pushed.
+- **Ask before pulling** (optional, per drive). Outgoing stays automatic; incoming shows you what GitHub wants to change in your folder, and you click **Accept** or **Not Now**.
 - **Three modes per drive.** *Auto*: drop and go. *Manual*: you commit (or click **Commit & Sync**), and Gitstick pulls when it's safe and pushes your commits. *Paused*: hands off.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for how the engine works and the rules it never breaks.
@@ -36,6 +37,8 @@ swift run gitstick pcs              # list your PCs and drives
 swift run gitstick sync   ~/code/x            # one sync cycle (auto mode)
 swift run gitstick watch  --manual ~/code/x   # keep synced; you commit, it pulls/pushes
 swift run gitstick commit ~/code/x            # "Commit & Sync": staged files, or everything
+swift run gitstick sync   --review ~/code/x   # push yours; show GitHub's changes instead of merging them
+swift run gitstick accept ~/code/x            # …then bring them in (or `decline` to hold them off)
 swift run gitstick status ~/code/x            # uncommitted / to push / to pull, no network
 ```
 

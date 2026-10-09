@@ -25,6 +25,12 @@ Each drive has a mode, switchable at any time from its menu:
 
 Manual is the mode for repos where history is communication: you write the commit messages and choose what goes into each commit, and Gitstick only does the pulling and pushing.
 
+### Ask before pulling
+
+Independently of the mode, each drive has a **pull policy**: *automatic* (the default) or *review* ("Ask Before Pulling" in the drive's menu). With review on, outgoing stays frictionless: your work is still committed and pushed on its own. Incoming is gated: when GitHub is ahead, the cycle fetches, builds a summary (who committed what, which files are added/changed/deleted/moved, and which of those also changed on this Mac), and stops in **incoming** without merging. Gitstick shows one dialog per new state of GitHub: **Accept** merges with the usual keep-both rules; **Not Now** holds the changes off, quietly, until GitHub moves on (you go to GitHub to sort out why); **Open on GitHub** opens the compare page and leaves the question pending in the menu. Decisions are stored in `.git/gitstick/` as the remote commit they apply to, so a relaunch neither forgets an accept nor re-asks a decline, and the CLI (`gitstick sync --review`, `accept`, `decline`) sees the same state.
+
+While changes are held off, your own commits can't be pushed (GitHub would reject them as non-fast-forward), so they wait locally, exactly like **waiting** (I11). Switching back to automatic brings everything in on the next cycle.
+
 **Commit & Sync** is the bridge between the two. In manual mode it commits *what you staged*, or everything if you staged nothing, with a generated message, and then syncs. Your staging is a decision, so it's honored. The Gatekeeper still applies, because Gitstick is the one making that commit.
 
 ## The engine
@@ -52,7 +58,7 @@ Every cycle runs the same five steps in the same order. The order is the design.
 1. **Guard.** If a human is mid-operation in this repo (a merge, rebase, cherry-pick, or bisect in progress, or `index.lock` held by another git process), stop and report *paused*. Gitstick is a guest in your repo; it never fights the terminal or VS Code.
 2. **Snapshot** (auto mode, or Commit & Sync). Stage, let the Gatekeeper unstage anything risky, then commit with a generated message. This happens *before* anything remote is touched. In manual mode without Commit & Sync, this step is skipped entirely.
 3. **Fetch.**
-4. **Integrate.** Fast-forward if possible, otherwise make a real merge commit. Conflicts go to the ConflictResolver. Unrelated histories (two Macs both making the first commit into an empty repo) are joined, not refused. If git refuses because the merge would overwrite uncommitted or untracked files, or if the index has staged changes, the cycle stops in **waiting** and names the files in the way. Nothing has been changed at that point.
+4. **Integrate.** With the review pull policy, stop here in **incoming** unless you accepted exactly this remote state. Fast-forward if possible, otherwise make a real merge commit. Conflicts go to the ConflictResolver. Unrelated histories (two Macs both making the first commit into an empty repo) are joined, not refused. If git refuses because the merge would overwrite uncommitted or untracked files, or if the index has staged changes, the cycle stops in **waiting** and names the files in the way. Nothing has been changed at that point.
 5. **Push** to the same branch. If someone pushed in between, go back to step 3 (up to 3 times). If the branch is protected or read-only, *divert*.
 
 ## Invariants
@@ -94,7 +100,7 @@ Held-back files stay on disk, untouched, and are reported on every cycle. Junk (
 | File | Responsibility |
 |---|---|
 | `Git.swift` | Non-interactive `git` runner. Binary-safe output, auth header, no prompts (I4). |
-| `RepoSyncer.swift` | Modes, the cycle, and the state machine (I1, I3, I5, I7–I11). |
+| `RepoSyncer.swift` | Modes, the pull policy and review decisions, the cycle, and the state machine (I1, I3, I5, I7–I11). |
 | `ConflictResolver.swift` | Keep-both policy over index stages 2 (ours) and 3 (theirs) (I2). |
 | `Gatekeeper.swift` | Local excludes, secret and size checks (I6). |
 | `CommitMessage.swift` | Deterministic messages from `--name-status`. |
