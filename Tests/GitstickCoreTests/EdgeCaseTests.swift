@@ -87,6 +87,16 @@ extension SyncEngineTests {
         XCTAssertNil(Git(repo: a.git.repo).value(["config", "http.https://github.com/.extraheader"]))
     }
 
+    // A half-open connection must not hang a drive forever, and ssh must never stop to ask.
+    func testNetworkCallsCanNeverHangOrPrompt() throws {
+        let a = try mac("alpha")
+        XCTAssertEqual(a.git.value(["config", "http.lowSpeedLimit"]), String(Git.stallBytesPerSecond))
+        XCTAssertEqual(a.git.value(["config", "http.lowSpeedTime"]), String(Git.stallSeconds))
+        // A shell alias runs with the environment git got, so it shows what ssh would be told.
+        XCTAssertEqual(a.git.value(["-c", "alias.sshcmd=!printenv GIT_SSH_COMMAND", "sshcmd"]), "ssh -o BatchMode=yes")
+        XCTAssertNil(a.git.value(["config", "core.sshCommand"]))                // nothing persisted
+    }
+
     // Binary files can't be merged line by line; both versions must survive byte for byte.
     func testBinaryConflictKeepsBoth() throws {
         let a = try mac("alpha"), b = try mac("beta")

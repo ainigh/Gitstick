@@ -55,9 +55,17 @@ public struct Git: Sendable {
         return "/usr/bin/git"
     }()
 
+    /// A transfer slower than this, for `stallSeconds`, is treated as a dead connection and aborted
+    /// (git's `http.lowSpeedLimit` / `http.lowSpeedTime`). Git itself would wait on a half-open
+    /// socket forever, which would freeze the drive's serial queue; aborting turns a stalled fetch
+    /// or push into an *offline* cycle that is retried a minute later.
+    public static var stallBytesPerSecond = 1000
+    public static var stallSeconds = 90
+
     @discardableResult
     public func run(_ args: [String], allowFailure: Bool = false, cwd: URL? = nil) throws -> GitResult {
-        var full: [String] = ["-c", "core.quotepath=off", "-c", "core.pager=cat", "-c", "advice.detachedHead=false"]
+        var full: [String] = ["-c", "core.quotepath=off", "-c", "core.pager=cat", "-c", "advice.detachedHead=false",
+                              "-c", "http.lowSpeedLimit=\(Git.stallBytesPerSecond)", "-c", "http.lowSpeedTime=\(Git.stallSeconds)"]
         if let id = identity ?? identityProvider?() {
             full += ["-c", "user.name=\(id.name)", "-c", "user.email=\(id.email)"]
         }
@@ -75,6 +83,11 @@ public struct Git: Sendable {
         env["GIT_ASKPASS"] = "echo"
         env["SSH_ASKPASS"] = "echo"
         env["GCM_INTERACTIVE"] = "never"
+        // An SSH remote must not stop at a host-key or passphrase question either: BatchMode makes
+        // ssh fail instead of asking. The user's own GIT_SSH_COMMAND / GIT_SSH is left alone.
+        if env["GIT_SSH_COMMAND"] == nil && env["GIT_SSH"] == nil {
+            env["GIT_SSH_COMMAND"] = "ssh -o BatchMode=yes"
+        }
         env["LC_ALL"] = "C"
         if let token = credentials?.token() {
             // Basic auth header with the token, passed as a one-shot config entry through the
