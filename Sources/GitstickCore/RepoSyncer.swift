@@ -59,6 +59,9 @@ public enum SyncStatus: Equatable, Sendable {
     case waiting(String)
     /// Branch is protected / read-only: local work is safe on a side branch.
     case divertedTo(branch: String)
+    /// GitHub can't be reached right now. Local work is committed (auto mode) and waits; the next
+    /// cycle tries again. Not an error: laptops go offline all the time.
+    case offline(lastSync: Date?)
     case error(String)
 }
 
@@ -220,7 +223,7 @@ public final class RepoSyncer: @unchecked Sendable {
         } catch {
             // A failed merge must never leave the tree half-merged for the next cycle.
             abortIntegrationIfNeeded()
-            report.status = .error(Self.humanize(error))
+            report.status = Self.isOffline(error) ? .offline(lastSync: lastSync) : .error(Self.humanize(error))
         }
         if case .idle = report.status {
             lastSync = Date()
@@ -516,11 +519,18 @@ public final class RepoSyncer: @unchecked Sendable {
         return .other(stderr.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
+    /// A network failure, as opposed to something wrong with the repo or the account: no DNS, no
+    /// route, a refused or timed-out connection, or a transfer that stalled (see `Git.stallSeconds`).
+    static func isOffline(_ error: Error) -> Bool {
+        let text = "\(error)".lowercased()
+        return ["could not resolve host", "unable to access", "could not connect", "connection refused",
+                "connection timed out", "network is unreachable", "operation timed out", "operation too slow",
+                "could not read from remote repository", "connection reset", "ssl_connect", "no route to host"]
+            .contains { text.contains($0) }
+    }
+
     static func humanize(_ error: Error) -> String {
         let text = "\(error)".lowercased()
-        if text.contains("could not resolve host") || text.contains("unable to access") {
-            return "Offline — changes are saved locally and will sync later"
-        }
         if text.contains("authentication") || text.contains("could not read username") {
             return "Not signed in to GitHub"
         }

@@ -46,6 +46,7 @@ func describe(_ r: SyncReport) -> String {
     case .paused(let why): lines.append("⏸ paused: \(why)")
     case .waiting(let why): lines.append("⏳ \(why)")
     case .divertedTo(let b): lines.append("↪︎ branch is protected; your work is on '\(b)'")
+    case .offline: lines.append("⌁ offline: changes are saved locally and will sync later")
     case .error(let e): lines.append("✗ \(e)")
     }
     lines.append("  local: \(describe(r.local))")

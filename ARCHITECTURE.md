@@ -95,6 +95,8 @@ Held-back files stay on disk, untouched, and are reported on every cycle. Junk (
 
 **I11 — Waiting is not an error.** A pull that would collide with local work leaves the repo exactly as it was and is retried on the next cycle. Your unpushed commits simply wait with it, since GitHub would reject them until the pull lands. This applies in auto mode too, when a held-back file sits where GitHub wants to put a file.
 
+**I12 — Offline is not an error either.** No DNS, no route, a refused or stalled connection: the cycle reports *offline* (grey, no notification), your work is already committed (I1) and waits locally, and the next cycle tries again. Red is reserved for things that won't fix themselves: a bad token, a missing identity, a repo that's gone.
+
 ## Components
 
 | File | Responsibility |

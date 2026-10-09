@@ -263,7 +263,7 @@ final class AppModel: ObservableObject {
         case .divertedTo(let branch):
             announce("diverted:\(id):\(branch)", drive: id, title: "“\(name)” is protected on GitHub",
                      body: "Your changes are safe on the branch “\(branch)”. Open a pull request on GitHub to bring them in.")
-        case .error(let why) where !why.hasPrefix("Offline"):
+        case .error(let why):
             announce("error:\(id):\(why)", drive: id, title: "“\(name)” isn't syncing", body: why)
         default: break
         }
@@ -343,7 +343,7 @@ final class AppModel: ObservableObject {
             return "externaldrive.badge.questionmark"
         }
         if all.contains(where: {
-            switch $0 { case .paused, .waiting: return true; default: return false }
+            switch $0 { case .paused, .waiting, .offline: return true; default: return false }
         }) {
             return "externaldrive.badge.minus"
         }
@@ -366,6 +366,11 @@ extension SyncStatus {
         case .paused(let why): return "Paused — \(why)"
         case .waiting(let why): return why
         case .divertedTo(let b): return "Read-only branch — saved to \(b)"
+        case .offline(let d):
+            guard let d else { return "Offline — will sync when you're back online" }
+            let f = RelativeDateTimeFormatter()
+            f.unitsStyle = .short
+            return "Offline — last synced \(f.localizedString(for: d, relativeTo: Date()))"
         case .error(let e): return e
         }
     }
@@ -374,7 +379,7 @@ extension SyncStatus {
         switch self {
         case .idle: return .green
         case .syncing: return .blue
-        case .paused: return .gray
+        case .paused, .offline: return .gray
         case .waiting, .divertedTo, .incoming: return .orange
         case .error: return .red
         }

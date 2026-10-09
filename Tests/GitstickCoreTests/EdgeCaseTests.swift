@@ -87,6 +87,40 @@ extension SyncEngineTests {
         XCTAssertNil(Git(repo: a.git.repo).value(["config", "http.https://github.com/.extraheader"]))
     }
 
+    // No network: your work is committed and kept, the drive says "offline" (not "error"), and the
+    // next cycle simply tries again.
+    func testOfflineIsAStateNotAnError() throws {
+        let a = try mac("alpha")
+        try write(a, "seed", "s"); assertIdle(a.syncOnce())
+        let before = a.lastSync
+        setenv("no_proxy", "127.0.0.1", 1); setenv("NO_PROXY", "127.0.0.1", 1)   // nothing stands in for GitHub
+        try a.git.run(["remote", "set-url", "origin", "https://127.0.0.1:1/nobody/home.git"])
+
+        try write(a, "later.txt", "l")
+        let r = a.syncOnce()
+        guard case .offline(let last) = r.status else { return XCTFail("expected offline, got \(r.status)") }
+        XCTAssertEqual(last, before)
+        XCTAssertEqual(r.committed, "Add later.txt")                    // committed first (I1), so nothing is at risk
+        XCTAssertEqual(r.local.ahead, 1)
+        XCTAssertFalse(r.pushed)
+
+        try a.git.run(["remote", "set-url", "origin", remote.path])    // back online
+        let r2 = a.syncOnce()
+        assertIdle(r2)
+        XCTAssertTrue(r2.pushed)
+    }
+
+    func testOfflineErrorsAreRecognized() {
+        for text in ["fatal: unable to access 'https://github.com/o/r/': Could not resolve host: github.com",
+                     "fatal: unable to access 'https://github.com/o/r/': Operation too slow. Less than 1000 bytes/sec transferred the last 90 seconds",
+                     "ssh: connect to host github.com port 22: Network is unreachable\nfatal: Could not read from remote repository."] {
+            XCTAssertTrue(RepoSyncer.isOffline(SyncFailure(message: text)), text)
+        }
+        for text in ["remote: Repository not found.", "Author identity unknown", "fatal: Authentication failed"] {
+            XCTAssertFalse(RepoSyncer.isOffline(SyncFailure(message: text)), text)
+        }
+    }
+
     // A half-open connection must not hang a drive forever, and ssh must never stop to ask.
     func testNetworkCallsCanNeverHangOrPrompt() throws {
         let a = try mac("alpha")
