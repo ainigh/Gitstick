@@ -78,8 +78,8 @@ These are what the tests check. Each one exists because breaking it either loses
 **I5 — Back off from humans.** See step 1 of the cycle. If you start a rebase in the terminal, Gitstick waits for you to finish rather than committing into the middle of it. A bare `index.lock` is given two seconds to disappear first: VS Code's background `git status` and a quick `git add` hold it for a moment, and that is not someone at work.
 
 **I6 — When in doubt, hold back.** A wrong auto-commit is permanent and possibly public; a held-back file is a yellow line in the menu. The Gatekeeper refuses:
-- secret-looking files by name (`.env`, `id_rsa`, `*.pem`, `*.p12` …)
-- secret-looking content (private keys, GitHub/AWS/Slack/Stripe/Anthropic tokens)
+- secret-looking files by name (`.env`, `.envrc`, `.netrc`, `id_rsa`, `credentials`, `secrets.yml`, `client_secret_*.json`, `*.pem`, `*.key`, `*.p12`, `*.p8`, `*.kdbx`, `*.tfstate` …) or by folder (anything under `.ssh/`, `.aws/`, `.gnupg/`, `.kube/`); `.env.example` and friends are fine
+- secret-looking content (private keys, GitHub, GitLab, AWS, Slack, Stripe, Anthropic, OpenAI, Google, npm, PyPI, Hugging Face, SendGrid tokens, Slack webhooks)
 - files over 50 MB (GitHub's warning threshold; the hard rejection is at 100 MB)
 - folders that are a git repository of their own (a dragged-in project with its `.git`): git would commit them as an empty pointer, and every other Mac would see an empty folder
 

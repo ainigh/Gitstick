@@ -41,19 +41,37 @@ public struct Gatekeeper {
     ]
 
     static let secretNames: [String] = [
-        ".env", ".npmrc", ".pypirc", ".netrc", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519",
-        "credentials.json", "service-account.json",
+        ".env", ".envrc", ".npmrc", ".pypirc", ".netrc", ".htpasswd", ".pgpass", ".git-credentials",
+        "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519",
+        "credentials", "credentials.json", "service-account.json", "secrets.json", "secrets.yml", "secrets.yaml",
+        "token.json", "kubeconfig",
     ]
-    static let secretExtensions: [String] = ["pem", "key", "p12", "pfx", "keystore", "jks", "ovpn"]
+    /// `client_secret_123.json` (Google OAuth downloads) and friends.
+    static let secretNamePrefixes: [String] = ["client_secret", "id_rsa.", "id_ed25519."]
+    static let secretExtensions: [String] = [
+        "pem", "key", "p12", "pfx", "p8", "ppk", "keystore", "jks", "ovpn", "kdbx", "keychain", "tfstate",
+    ]
+    /// Anything inside these folders is credentials by definition, whatever it's called.
+    static let secretDirectories: [String] = [".ssh", ".aws", ".gnupg", ".kube"]
 
     static let secretContentPatterns: [(String, String)] = [
-        ("-----BEGIN [A-Z ]*PRIVATE KEY-----", "private key"),
+        ("-----BEGIN [A-Z ]*PRIVATE KEY( BLOCK)?-----", "private key"),
         ("gh[pousr]_[A-Za-z0-9]{36,}", "GitHub token"),
         ("github_pat_[A-Za-z0-9_]{50,}", "GitHub token"),
         ("AKIA[0-9A-Z]{16}", "AWS access key"),
+        ("(?i)aws_secret_access_key\\s*[=:]\\s*[\"']?[A-Za-z0-9/+]{40}", "AWS secret key"),
         ("xox[baprs]-[A-Za-z0-9-]{10,}", "Slack token"),
+        ("hooks\\.slack\\.com/services/T[A-Za-z0-9]+/B[A-Za-z0-9]+/[A-Za-z0-9]+", "Slack webhook"),
         ("sk-ant-[A-Za-z0-9_-]{20,}", "Anthropic API key"),
+        ("sk-(proj-)?[A-Za-z0-9_-]{10,}T3BlbkFJ[A-Za-z0-9_-]{10,}", "OpenAI API key"),
+        ("AIza[0-9A-Za-z_-]{35}", "Google API key"),
         ("sk_live_[A-Za-z0-9]{20,}", "Stripe key"),
+        ("rk_live_[A-Za-z0-9]{20,}", "Stripe key"),
+        ("npm_[A-Za-z0-9]{36}", "npm token"),
+        ("pypi-AgEIcHlwaS5vcmc[A-Za-z0-9_-]{50,}", "PyPI token"),
+        ("hf_[A-Za-z0-9]{30,}", "Hugging Face token"),
+        ("SG\\.[A-Za-z0-9_-]{22}\\.[A-Za-z0-9_-]{43}", "SendGrid key"),
+        ("glpat-[A-Za-z0-9_-]{20,}", "GitLab token"),
     ]
 
     public init() {}
@@ -82,10 +100,16 @@ public struct Gatekeeper {
         let lower = name.lowercased()
         let ext = (lower as NSString).pathExtension
 
-        if Self.secretNames.contains(lower) || (lower.hasPrefix(".env.") && !lower.hasSuffix(".example") && !lower.hasSuffix(".sample")) {
+        let isExample = lower.hasSuffix(".example") || lower.hasSuffix(".sample") || lower.hasSuffix(".template")
+        let secretName = Self.secretNames.contains(lower) || lower.hasPrefix(".env.")
+            || Self.secretNamePrefixes.contains(where: { lower.hasPrefix($0) })
+        if secretName && !isExample {
             return .looksLikeSecret("file name")
         }
         if Self.secretExtensions.contains(ext) { return .looksLikeSecret(".\(ext) file") }
+        if let dir = path.split(separator: "/").dropLast().first(where: { Self.secretDirectories.contains(String($0)) }) {
+            return .looksLikeSecret("inside \(dir)/")
+        }
 
         let url = root.appendingPathComponent(path)
         // A dragged-in project with its own .git: git stages it as a gitlink, not as files.
