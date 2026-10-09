@@ -205,6 +205,8 @@ public final class RepoSyncer: @unchecked Sendable {
         }
         if !held.isEmpty {
             let paths = held.map(\.path)
+            // Unstage (never delete) them. For a brand-new file this returns it to "untracked";
+            // for a tracked file the last committed version stays in the index.
             if hasCommits() {
                 try git.run(["reset", "-q", "--"] + paths)
             } else {
@@ -321,11 +323,20 @@ public final class RepoSyncer: @unchecked Sendable {
 
     // MARK: Guards & queries
 
+    /// How long to give a transient `index.lock` (VS Code's background `git status`, a quick
+    /// `git add` in the terminal) to go away before treating it as someone really working here.
+    public var lockGracePeriod: TimeInterval = 2
+
     /// Detects a human (or another tool) mid-way through a git operation.
     public func humanActivity() -> String? {
         let fm = FileManager.default
+        let lock = git.gitDir.appendingPathComponent("index.lock").path
+        let deadline = Date().addingTimeInterval(lockGracePeriod)
+        while fm.fileExists(atPath: lock) {
+            if Date() >= deadline { return "Another git process is running" }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
         let markers: [(String, String)] = [
-            ("index.lock", "Another git process is running"),
             ("MERGE_HEAD", "A merge is in progress"),
             ("rebase-merge", "A rebase is in progress"),
             ("rebase-apply", "A rebase is in progress"),

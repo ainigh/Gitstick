@@ -49,11 +49,6 @@ public struct Git: Sendable {
     @discardableResult
     public func run(_ args: [String], allowFailure: Bool = false, cwd: URL? = nil) throws -> GitResult {
         var full: [String] = ["-c", "core.quotepath=off", "-c", "core.pager=cat", "-c", "advice.detachedHead=false"]
-        if let token = credentials?.token() {
-            // Basic auth header with the token; avoids writing credentials into .git/config or URLs.
-            let basic = Data("x-access-token:\(token)".utf8).base64EncodedString()
-            full += ["-c", "http.https://github.com/.extraheader=AUTHORIZATION: basic \(basic)"]
-        }
         if let id = identity {
             full += ["-c", "user.name=\(id.name)", "-c", "user.email=\(id.email)"]
         }
@@ -72,6 +67,16 @@ public struct Git: Sendable {
         env["SSH_ASKPASS"] = "echo"
         env["GCM_INTERACTIVE"] = "never"
         env["LC_ALL"] = "C"
+        if let token = credentials?.token() {
+            // Basic auth header with the token, passed as a one-shot config entry through the
+            // environment (GIT_CONFIG_COUNT, git 2.31+). Nothing lands in .git/config or a URL, and
+            // unlike a `-c` flag it isn't visible to every other process in `ps`.
+            let basic = Data("x-access-token:\(token)".utf8).base64EncodedString()
+            let n = Int(env["GIT_CONFIG_COUNT"] ?? "") ?? 0
+            env["GIT_CONFIG_KEY_\(n)"] = "http.https://github.com/.extraheader"
+            env["GIT_CONFIG_VALUE_\(n)"] = "AUTHORIZATION: basic \(basic)"
+            env["GIT_CONFIG_COUNT"] = String(n + 1)
+        }
         process.environment = env
 
         // Temp files instead of pipes: no deadlock on large outputs (e.g. `git show` of a big blob).

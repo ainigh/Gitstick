@@ -4,11 +4,15 @@ import Foundation
 public enum HoldReason: Equatable, Sendable, CustomStringConvertible {
     case looksLikeSecret(String)
     case tooLarge(bytes: Int64)
+    /// The folder is a git repository of its own. Git would commit it as an empty pointer
+    /// (a "gitlink"), so every other Mac would see an empty folder.
+    case nestedRepository
 
     public var description: String {
         switch self {
         case .looksLikeSecret(let why): return "looks like a secret (\(why))"
         case .tooLarge(let b): return "too large (\(ByteCountFormatter.string(fromByteCount: b, countStyle: .file)))"
+        case .nestedRepository: return "is a git repository of its own (delete its .git folder to sync its files)"
         }
     }
 }
@@ -84,6 +88,8 @@ public struct Gatekeeper {
         if Self.secretExtensions.contains(ext) { return .looksLikeSecret(".\(ext) file") }
 
         let url = root.appendingPathComponent(path)
+        // A dragged-in project with its own .git: git stages it as a gitlink, not as files.
+        if FileManager.default.fileExists(atPath: url.appendingPathComponent(".git").path) { return .nestedRepository }
         guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
               (attrs[.type] as? FileAttributeType) == .typeRegular else { return nil }
         let size = (attrs[.size] as? NSNumber)?.int64Value ?? 0
