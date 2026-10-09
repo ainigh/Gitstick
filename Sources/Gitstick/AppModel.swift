@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import ServiceManagement
 import SwiftUI
 import GitstickCore
@@ -29,12 +30,18 @@ final class AppModel: ObservableObject {
     let tokens: TokenProvider
     let manager: DriveManager
     let notifier = Notifier()
+    let updater: Updater
+    private var bag = Set<AnyCancellable>()
     private var catalog: GitHubCatalog { GitHubCatalog(tokens: tokens) }
 
     init() {
         tokens = TokenProvider(explicit: { Keychain.read() })
         manager = DriveManager(tokens: tokens)
+        updater = Updater(tokens: tokens)
         notifier.onOpen = { [weak self] id in Task { @MainActor in self?.reveal(id) } }
+        // The menubar icon and the menu read the updater through this model.
+        updater.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &bag)
+        updater.beforeRelaunch = { [weak self] in self?.manager.stopAll() }
         manager.onStatus = { [weak self] id, status in
             Task { @MainActor in
                 self?.statuses[id] = status
@@ -54,6 +61,19 @@ final class AppModel: ObservableObject {
         plugged = manager.drives
         manager.startAll()
         Task { await refresh() }
+        updater.start()
+        noteVersionChange()
+    }
+
+    /// "Gitstick updated to 0.3.12", once, the first time a new copy runs.
+    private func noteVersionChange() {
+        guard Updater.isBundled else { return }
+        let key = "lastRunVersion", now = Updater.currentVersion
+        let previous = UserDefaults.standard.string(forKey: key)
+        UserDefaults.standard.set(now, forKey: key)
+        guard let previous, previous != now else { return }
+        notifier.notify(drive: "", key: "updated:\(now)", title: "Gitstick updated to \(now)",
+                        body: "Your drives are syncing as before.")
     }
 
     // MARK: Catalog
@@ -306,7 +326,14 @@ final class AppModel: ObservableObject {
 
     // MARK: Overall state for the menubar icon
 
+    /// The drive icon, with its badge for the drives' state. It turns solid when an update is ready.
     var menuSymbol: String {
+        let symbol = driveSymbol
+        guard updater.available != nil, symbol.hasPrefix("externaldrive") else { return symbol }
+        return "externaldrive.fill" + String(symbol.dropFirst("externaldrive".count))
+    }
+
+    private var driveSymbol: String {
         let all = plugged.compactMap { statuses[$0.fullName] }
         if all.contains(where: { if case .error = $0 { return true }; return false }) {
             return "externaldrive.badge.exclamationmark"

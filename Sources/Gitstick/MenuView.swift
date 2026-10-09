@@ -11,6 +11,7 @@ struct MenuView: View {
         VStack(alignment: .leading, spacing: 0) {
             header
             Divider()
+            updateBanner
             if model.signedInAs == nil && !model.loading {
                 signIn
             } else {
@@ -49,6 +50,55 @@ struct MenuView: View {
                 .buttonStyle(.borderless).help("Refresh")
         }
         .padding(12)
+    }
+
+    // MARK: Updates
+
+    /// Shown only when there's something to say: a release is ready, it's installing, or it failed.
+    @ViewBuilder private var updateBanner: some View {
+        switch model.updater.state {
+        case .available(let release):
+            HStack(spacing: 8) {
+                Image(systemName: "arrow.down.circle.fill").foregroundStyle(Color.accentColor)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Gitstick \(release.version?.description ?? release.tag) is ready").font(.subheadline.bold())
+                    Text(release.title).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }
+                Spacer()
+                Button("Update") { model.updater.install() }.controlSize(.small)
+            }
+            .padding(.horizontal, 12).padding(.vertical, 8)
+            .background(Color.accentColor.opacity(0.08))
+            Divider()
+        case .installing(let step):
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text(step).font(.caption)
+                Spacer()
+            }
+            .padding(.horizontal, 12).padding(.vertical, 8)
+            Divider()
+        case .failed(let why):
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.triangle").foregroundStyle(.orange)
+                Text(why).font(.caption).lineLimit(3)
+                Spacer()
+                Button("Try Again") { model.updater.check(userInitiated: true) }.controlSize(.small)
+            }
+            .padding(.horizontal, 12).padding(.vertical, 8)
+            Divider()
+        default:
+            EmptyView()
+        }
+    }
+
+    private var versionLine: String {
+        let v = "Version \(Updater.currentVersion)" + (Updater.currentCommit.map { " (\($0))" } ?? "")
+        switch model.updater.state {
+        case .checking: return v + " · checking…"
+        case .upToDate: return v + " · up to date"
+        default: return v
+        }
     }
 
     // MARK: Sign in
@@ -112,6 +162,13 @@ struct MenuView: View {
             Button("Open Gitstick Folder") { model.openRoot() }
             Spacer()
             Menu {
+                Text(versionLine)
+                if Updater.isBundled {
+                    Button("Check for Updates…") { model.updater.check(userInitiated: true) }
+                } else {
+                    Text("Updates need the built app (Scripts/make-app.sh)")
+                }
+                Divider()
                 if AppModel.canLaunchAtLogin {
                     Toggle("Launch at Login", isOn: Binding(
                         get: { model.launchAtLogin },
