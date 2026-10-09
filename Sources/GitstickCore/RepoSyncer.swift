@@ -11,9 +11,47 @@ public enum SyncMode: String, Codable, CaseIterable, Sendable {
     case paused
 }
 
+/// Whether changes from GitHub land in the folder on their own, or wait for your OK.
+public enum PullPolicy: String, Codable, CaseIterable, Sendable {
+    /// Remote changes are merged as soon as they're seen.
+    case automatic
+    /// Remote changes are fetched and summarized, then wait until you accept them. Your own work
+    /// is still committed and pushed on its own, as long as GitHub isn't ahead of you.
+    case review
+}
+
+/// What GitHub has that this folder doesn't, summarized for a human to accept or decline.
+public struct IncomingChanges: Equatable, Sendable {
+    public struct Commit: Equatable, Sendable {
+        public let sha: String
+        public let author: String
+        public let subject: String
+    }
+    /// The remote commit these changes end at. A decision (accept / decline) is about this exact
+    /// commit; if GitHub moves on, you're asked again.
+    public let remoteHead: String
+    public let commits: [Commit]
+    /// Status letter (A/M/D/R…) and path, as `git diff --name-status` reports them.
+    public let files: [(status: Character, path: String)]
+    /// Of those, the files that also changed on this Mac since the two sides diverged.
+    /// Accepting keeps both versions (I2); these are the ones that will get a conflict copy.
+    public let alsoChangedHere: [String]
+    /// You said "not now" to exactly these changes. They stay on GitHub, nothing nags, and the
+    /// next time GitHub moves you're asked about the new state.
+    public let declined: Bool
+
+    public static func == (l: IncomingChanges, r: IncomingChanges) -> Bool {
+        l.remoteHead == r.remoteHead && l.declined == r.declined && l.commits == r.commits
+            && l.alsoChangedHere == r.alsoChangedHere
+            && l.files.map { "\($0.status)\($0.path)" } == r.files.map { "\($0.status)\($0.path)" }
+    }
+}
+
 public enum SyncStatus: Equatable, Sendable {
     case idle(lastSync: Date?)
     case syncing
+    /// Changes on GitHub are waiting for your OK (pull policy is `.review`). Nothing was merged.
+    case incoming(IncomingChanges)
     /// A human or tool is mid-operation in this repo, or sync is switched off. We wait.
     case paused(String)
     /// Remote changes are ready but pulling them now would touch your uncommitted work.
@@ -69,6 +107,11 @@ public final class RepoSyncer: @unchecked Sendable {
         set { lock.lock(); _mode = newValue; lock.unlock() }
     }
 
+    public var pullPolicy: PullPolicy {
+        get { lock.lock(); defer { lock.unlock() }; return _pullPolicy }
+        set { lock.lock(); _pullPolicy = newValue; lock.unlock() }
+    }
+
     public var onStatus: ((SyncStatus) -> Void)?
     public var onReport: ((SyncReport) -> Void)?
     public var onLocalState: ((LocalState) -> Void)?
@@ -76,6 +119,7 @@ public final class RepoSyncer: @unchecked Sendable {
     private let queue: DispatchQueue
     private let lock = NSLock()
     private var _mode: SyncMode
+    private var _pullPolicy: PullPolicy = .automatic
     private var running = false
     private var pending = false
     private var wantCommit = false
@@ -232,6 +276,7 @@ public final class RepoSyncer: @unchecked Sendable {
             let remoteExists = git.value(["rev-parse", "--verify", "-q", remoteRef]) != nil
 
             if remoteExists {
+                if let review = try awaitingReview(remoteRef: remoteRef) { return .incoming(review) }
                 if let wait = try integrate(remoteRef: remoteRef, report: &report) { return wait }
             }
 
@@ -248,6 +293,73 @@ public final class RepoSyncer: @unchecked Sendable {
             }
         }
         throw SyncFailure(message: "Remote keeps changing; will retry shortly")
+    }
+
+    // MARK: Reviewing incoming changes
+
+    /// With `pullPolicy == .review`: if GitHub is ahead and you haven't accepted exactly this remote
+    /// state, describe it and stop. Returns nil when there's nothing to review (not behind, policy
+    /// is automatic, or you accepted this very commit).
+    func awaitingReview(remoteRef: String) throws -> IncomingChanges? {
+        guard pullPolicy == .review, hasCommits(), let remoteHead = git.value(["rev-parse", remoteRef]) else { return nil }
+        guard (Int(git.value(["rev-list", "--count", "HEAD..\(remoteRef)"]) ?? "0") ?? 0) > 0 else { return nil }
+        if decision(.accepted) == remoteHead { return nil }
+        return try describeIncoming(remoteRef: remoteRef, remoteHead: remoteHead, declined: decision(.declined) == remoteHead)
+    }
+
+    func describeIncoming(remoteRef: String, remoteHead: String, declined: Bool) throws -> IncomingChanges {
+        let log = try git.run(["log", "--format=%h%x1f%an%x1f%s", "-z", "HEAD..\(remoteRef)"]).stdoutData
+        let commits: [IncomingChanges.Commit] = log.split(separator: 0).compactMap { entry in
+            let f = String(decoding: entry, as: UTF8.self).components(separatedBy: "\u{1f}")
+            guard f.count == 3 else { return nil }
+            return .init(sha: f[0], author: f[1], subject: f[2])
+        }
+        let base = git.value(["merge-base", "HEAD", remoteRef])
+        let files = parseNameStatusZ(try git.run(["diff", "--name-status", "-z", base ?? "HEAD", remoteRef]).stdoutData)
+        var alsoHere: [String] = []
+        if let base {
+            let ours = Set(parseNameStatusZ(try git.run(["diff", "--name-status", "-z", base, "HEAD"]).stdoutData).map(\.path))
+            alsoHere = files.map(\.path).filter(ours.contains)
+        }
+        return IncomingChanges(remoteHead: remoteHead, commits: commits, files: files, alsoChangedHere: alsoHere, declined: declined)
+    }
+
+    /// "Yes, bring these in." Takes effect on the next cycle.
+    public func acceptIncoming(_ changes: IncomingChanges) {
+        record(.accepted, changes.remoteHead)
+        record(.declined, nil)
+    }
+
+    /// "Not now." The changes stay on GitHub, the drive shows them as held off, and you're only
+    /// asked again when GitHub moves on. Go to GitHub to sort out why.
+    public func declineIncoming(_ changes: IncomingChanges) {
+        record(.declined, changes.remoteHead)
+    }
+
+    /// Clears a decline so the next cycle asks again about the same changes.
+    public func reconsiderIncoming() {
+        record(.declined, nil)
+    }
+
+    public enum Decision: String, Sendable { case accepted, declined }
+
+    /// Decisions live in .git/gitstick/ so they survive a relaunch and are visible to the CLI.
+    private func decisionFile(_ d: Decision) -> URL {
+        git.gitDir.appendingPathComponent("gitstick").appendingPathComponent(d.rawValue)
+    }
+
+    public func decision(_ d: Decision) -> String? {
+        (try? String(contentsOf: decisionFile(d), encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    public func record(_ d: Decision, _ sha: String?) {
+        let file = decisionFile(d)
+        if let sha {
+            try? FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? sha.write(to: file, atomically: true, encoding: .utf8)
+        } else {
+            try? FileManager.default.removeItem(at: file)
+        }
     }
 
     /// Merge remote into local. Fast-forward when possible; otherwise merge commit with keep-both.
