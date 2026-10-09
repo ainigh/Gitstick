@@ -524,6 +524,10 @@ public final class RepoSyncer: @unchecked Sendable {
         if text.contains("authentication") || text.contains("could not read username") {
             return "Not signed in to GitHub"
         }
+        if text.contains("author identity unknown") || text.contains("please tell me who you are")
+            || text.contains("unable to auto-detect email") || text.contains("empty ident name") {
+            return "Can't commit yet: no name and email for git. Sign in to GitHub (or set user.name and user.email) and this will retry"
+        }
         return "\(error)"
     }
 }

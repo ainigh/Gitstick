@@ -7,6 +7,9 @@ final class SyncEngineTests: XCTestCase {
     var remote: URL!
 
     override func setUpWithError() throws {
+        // The suite must not depend on whoever runs it: no global identity, signing, hooks, or aliases.
+        setenv("GIT_CONFIG_GLOBAL", "/dev/null", 1)
+        setenv("GIT_CONFIG_NOSYSTEM", "1", 1)
         tmp = FileManager.default.temporaryDirectory.appendingPathComponent("gitstick-tests-\(UUID().uuidString)")
         remote = tmp.appendingPathComponent("remote.git")
         try FileManager.default.createDirectory(at: remote, withIntermediateDirectories: true)

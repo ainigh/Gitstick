@@ -127,7 +127,22 @@ public enum DriveError: Error, CustomStringConvertible {
 public final class DriveManager: @unchecked Sendable {
     public let root: URL
     public let tokens: TokenProvider
-    public var identity: (name: String, email: String)?
+    /// The name and email Gitstick commits as, when the repo has no `user.email` of its own.
+    /// Learned from GitHub after sign-in, remembered across launches (`identity.json`), and read by
+    /// every session at call time, so a drive started before sign-in finished picks it up as soon as
+    /// it's known, and a drive that couldn't commit for lack of one retries right away.
+    public var identity: Git.Identity? {
+        get { lock.lock(); defer { lock.unlock() }; return _identity }
+        set {
+            lock.lock()
+            let wasUnknown = _identity == nil
+            _identity = newValue
+            lock.unlock()
+            saveIdentity()
+            if wasUnknown && newValue != nil { sessions.values.forEach { $0.syncNow() } }
+        }
+    }
+    private var _identity: Git.Identity?
     public private(set) var drives: [PluggedDrive] = []
     public private(set) var sessions: [String: DriveSession] = [:]
 
@@ -136,6 +151,7 @@ public final class DriveManager: @unchecked Sendable {
     public var onLocalState: ((String, LocalState) -> Void)?
 
     private let storeURL: URL
+    private let identityURL: URL
     private let lock = NSLock()
 
     public init(root: URL? = nil, stateDir: URL? = nil, tokens: TokenProvider) {
@@ -145,6 +161,7 @@ public final class DriveManager: @unchecked Sendable {
             .first!.appendingPathComponent("Gitstick")
         try? FileManager.default.createDirectory(at: state, withIntermediateDirectories: true)
         self.storeURL = state.appendingPathComponent("drives.json")
+        self.identityURL = state.appendingPathComponent("identity.json")
         self.tokens = tokens
         load()
     }
@@ -152,9 +169,22 @@ public final class DriveManager: @unchecked Sendable {
     // MARK: Persistence
 
     func load() {
+        if let data = try? Data(contentsOf: identityURL),
+           let saved = try? JSONDecoder().decode(SavedIdentity.self, from: data) {
+            _identity = (saved.name, saved.email)
+        }
         guard let data = try? Data(contentsOf: storeURL),
               let list = try? JSONDecoder().decode([PluggedDrive].self, from: data) else { return }
         drives = list
+    }
+
+    private struct SavedIdentity: Codable { let name: String; let email: String }
+
+    private func saveIdentity() {
+        guard let id = identity else { try? FileManager.default.removeItem(at: identityURL); return }
+        if let data = try? JSONEncoder().encode(SavedIdentity(name: id.name, email: id.email)) {
+            try? data.write(to: identityURL, options: .atomic)
+        }
     }
 
     func save() {
@@ -273,9 +303,17 @@ public final class DriveManager: @unchecked Sendable {
 
     private func startSession(_ drive: PluggedDrive) {
         sessions[drive.fullName]?.stop()
-        // Only inject an identity if the user hasn't configured one for git themselves.
+        // Only inject an identity if the user hasn't configured one for git themselves. Ours is looked
+        // up per call, so sign-in finishing after this session started is not too late.
         let hasOwnIdentity = Git(repo: drive.url).value(["config", "user.email"]) != nil
-        let git = Git(repo: drive.url, credentials: tokens, identity: hasOwnIdentity ? nil : identity)
+        var provider: (@Sendable () -> Git.Identity?)? = nil
+        if !hasOwnIdentity {
+            provider = { [weak self] () -> Git.Identity? in
+                guard let self else { return nil }
+                return self.identity
+            }
+        }
+        let git = Git(repo: drive.url, credentials: tokens, identityProvider: provider)
         let session = DriveSession(drive: drive, git: git)
         let id = drive.fullName
         session.syncer.onStatus = { [weak self] s in self?.onStatus?(id, s) }
