@@ -28,14 +28,23 @@ public protocol CredentialSource: Sendable {
 /// terminal prompts, editors and pagers, so a missing credential or a merge message
 /// turns into an error/auto-message instead of a hang.
 public struct Git: Sendable {
+    public typealias Identity = (name: String, email: String)
+
     public let repo: URL
     public let credentials: CredentialSource?
-    public let identity: (name: String, email: String)?
+    /// A fixed commit identity, passed as `-c user.name/user.email` on every call.
+    public let identity: Identity?
+    /// Looked up on every call instead, when the identity can become known (or change) after this
+    /// `Git` was created: the GitHub sign-in finishing a few seconds after launch, for instance.
+    /// `identity` wins when both are set.
+    public let identityProvider: (@Sendable () -> Identity?)?
 
-    public init(repo: URL, credentials: CredentialSource? = nil, identity: (name: String, email: String)? = nil) {
+    public init(repo: URL, credentials: CredentialSource? = nil, identity: Identity? = nil,
+                identityProvider: (@Sendable () -> Identity?)? = nil) {
         self.repo = repo
         self.credentials = credentials
         self.identity = identity
+        self.identityProvider = identityProvider
     }
 
     /// Path of the git binary. Overridable for tests / unusual installs.
@@ -49,7 +58,7 @@ public struct Git: Sendable {
     @discardableResult
     public func run(_ args: [String], allowFailure: Bool = false, cwd: URL? = nil) throws -> GitResult {
         var full: [String] = ["-c", "core.quotepath=off", "-c", "core.pager=cat", "-c", "advice.detachedHead=false"]
-        if let id = identity {
+        if let id = identity ?? identityProvider?() {
             full += ["-c", "user.name=\(id.name)", "-c", "user.email=\(id.email)"]
         }
         full += args

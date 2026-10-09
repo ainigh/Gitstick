@@ -112,6 +112,13 @@ struct MenuView: View {
             Button("Open Gitstick Folder") { model.openRoot() }
             Spacer()
             Menu {
+                if AppModel.canLaunchAtLogin {
+                    Toggle("Launch at Login", isOn: Binding(
+                        get: { model.launchAtLogin },
+                        set: { model.setLaunchAtLogin($0) }
+                    ))
+                    Divider()
+                }
                 if model.signedInAs != nil { Button("Sign Out") { model.signOut() } }
                 Button("Quit Gitstick") { model.manager.stopAll(); NSApp.terminate(nil) }
             } label: { Image(systemName: "gearshape") }
@@ -129,7 +136,6 @@ struct PluggedRow: View {
 
     var body: some View {
         let status = model.statuses[drive.fullName]
-        let report = model.reports[drive.fullName]
         let local = model.local[drive.fullName] ?? LocalState()
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 8) {
@@ -186,14 +192,17 @@ struct PluggedRow: View {
                 .padding(.leading, 16)
             }
 
-            if let report {
-                ForEach(report.heldBack, id: \.path) { h in
-                    Text("✋ \(h.path) not synced: \(h.reason.description)")
-                        .font(.caption2).foregroundStyle(.orange).lineLimit(2)
-                }
-                ForEach(report.conflictCopies, id: \.self) { c in
-                    Text("⚠︎ Kept both versions: \((c as NSString).lastPathComponent)")
-                        .font(.caption2).foregroundStyle(.orange).lineLimit(2)
+            // What needs you: held-back files (until they're gone) and conflict copies (until dismissed).
+            ForEach(model.attention[drive.fullName] ?? []) { a in
+                HStack(spacing: 4) {
+                    Text(a.text).font(.caption2).foregroundStyle(.orange).lineLimit(2)
+                    Spacer()
+                    Button { model.reveal(drive.fullName, path: a.path) } label: { Image(systemName: "magnifyingglass") }
+                        .buttonStyle(.borderless).controlSize(.small).help("Show in Finder")
+                    if a.kind == .conflict {
+                        Button { model.dismissAttention(a.id, for: drive.fullName) } label: { Image(systemName: "xmark.circle") }
+                            .buttonStyle(.borderless).controlSize(.small).help("Dismiss")
+                    }
                 }
             }
         }
