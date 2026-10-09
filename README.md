@@ -1,4 +1,4 @@
-#  Drive
+#  GateKeeper
 
 This is a mac application, icon in menubar. open to access PCs
 
