@@ -2,7 +2,7 @@ import XCTest
 @testable import GitstickCore
 
 /// Two "Macs" sharing one "GitHub" (a bare repo on disk).
-final class SyncEngineTests: XCTestCase {
+final class SyncEngineTests: XCTestCase { 
     var tmp: URL!
     var remote: URL!
 
