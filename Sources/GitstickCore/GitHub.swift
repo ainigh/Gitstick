@@ -27,10 +27,20 @@ public struct RemoteDrive: Identifiable, Hashable, Codable, Sendable {
 }
 
 /// Where the GitHub token comes from. Order: explicit (Keychain / pasted), $GITHUB_TOKEN, `gh auth token`.
+///
+/// Every git call asks for the token, and a cycle makes dozens of them. A hit is cached for good;
+/// a miss (no `gh`, or `gh` not logged in) is remembered for `retryAfter`, so a Mac that isn't
+/// signed in doesn't spawn the GitHub CLI once per git command, forever.
 public final class TokenProvider: CredentialSource, @unchecked Sendable {
     private var cached: String?
+    private var missedAt: Date?
     private let lock = NSLock()
     public var explicit: (() -> String?)?
+    /// How long a failed `gh auth token` lookup is trusted before it's tried again.
+    public var retryAfter: TimeInterval = 60
+    /// The GitHub CLI lookup and the process environment; replaceable for tests.
+    var cliLookup: () -> String? = TokenProvider.fromGHCLI
+    var environment: [String: String] = ProcessInfo.processInfo.environment
 
     public init(explicit: (() -> String?)? = nil) { self.explicit = explicit }
 
@@ -38,12 +48,16 @@ public final class TokenProvider: CredentialSource, @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         if let t = explicit?(), !t.isEmpty { return t }
         if let cached { return cached }
-        if let env = ProcessInfo.processInfo.environment["GITHUB_TOKEN"], !env.isEmpty { cached = env; return env }
-        if let gh = Self.fromGHCLI() { cached = gh; return gh }
+        if let env = environment["GITHUB_TOKEN"], !env.isEmpty { cached = env; return env }
+        if let missedAt, Date().timeIntervalSince(missedAt) < retryAfter { return nil }
+        if let gh = cliLookup() { cached = gh; missedAt = nil; return gh }
+        missedAt = Date()
         return nil
     }
 
-    public func invalidate() { lock.lock(); cached = nil; lock.unlock() }
+    /// Forget what was learned: the next call looks everything up again (after sign-in, sign-out,
+    /// or a 401 from GitHub).
+    public func invalidate() { lock.lock(); cached = nil; missedAt = nil; lock.unlock() }
 
     /// Reuse the GitHub CLI's login if present — zero-setup for people who already use `gh`.
     static func fromGHCLI() -> String? {

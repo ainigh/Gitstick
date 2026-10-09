@@ -56,6 +56,26 @@ extension SyncEngineTests {
         XCTAssertNil(DriveManager(root: tmp.appendingPathComponent("drives"), stateDir: state, tokens: TokenProvider()).identity)
     }
 
+    // Not signed in: the GitHub CLI is asked once a minute, not once per git command.
+    func testMissingTokenDoesNotSpawnTheCLIOnEveryCall() {
+        let calls = IdentityBox()      // reused as a thread-safe counter: .identity?.name holds the count
+        let tokens = TokenProvider()
+        tokens.environment = [:]                // whatever $GITHUB_TOKEN the test runner has is not the point
+        tokens.cliLookup = { calls.identity = ("\((Int(calls.identity?.name ?? "0") ?? 0) + 1)", ""); return nil }
+        for _ in 0..<50 { XCTAssertNil(tokens.token()) }
+        XCTAssertEqual(calls.identity?.name, "1")
+
+        tokens.retryAfter = 0                   // the grace period is over: ask again
+        XCTAssertNil(tokens.token())
+        XCTAssertEqual(calls.identity?.name, "2")
+
+        tokens.cliLookup = { calls.identity = ("hit", ""); return "ghp_fromcli" }
+        tokens.invalidate()                     // sign-in happened: look again, and a hit sticks
+        XCTAssertEqual(tokens.token(), "ghp_fromcli")
+        tokens.cliLookup = { XCTFail("a cached token must not be looked up again"); return nil }
+        XCTAssertEqual(tokens.token(), "ghp_fromcli")
+    }
+
     func testIdentityErrorIsHumanized() {
         let raw = GitError(args: ["commit"], result: GitResult(status: 128, stdoutData: Data(),
             stderr: "Author identity unknown\n\n*** Please tell me who you are.\n"))
