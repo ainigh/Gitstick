@@ -8,46 +8,101 @@ public struct PluggedDrive: Codable, Identifiable, Hashable, Sendable {
     public let name: String
     public let cloneURL: String
     public let localPath: String
-    public var autoSync: Bool = true
+    public var mode: SyncMode
 
     public var url: URL { URL(fileURLWithPath: localPath) }
+
+    public init(fullName: String, owner: String, name: String, cloneURL: String, localPath: String, mode: SyncMode) {
+        self.fullName = fullName; self.owner = owner; self.name = name
+        self.cloneURL = cloneURL; self.localPath = localPath; self.mode = mode
+    }
+
+    enum CodingKeys: String, CodingKey { case fullName, owner, name, cloneURL, localPath, mode, autoSync }
+
+    public init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: CodingKeys.self)
+        fullName = try c.decode(String.self, forKey: .fullName)
+        owner = try c.decode(String.self, forKey: .owner)
+        name = try c.decode(String.self, forKey: .name)
+        cloneURL = try c.decode(String.self, forKey: .cloneURL)
+        localPath = try c.decode(String.self, forKey: .localPath)
+        if let m = try c.decodeIfPresent(SyncMode.self, forKey: .mode) {
+            mode = m
+        } else {
+            // v0.1 stored `autoSync: Bool` (false meant read-only).
+            mode = (try c.decodeIfPresent(Bool.self, forKey: .autoSync) ?? true) ? .auto : .manual
+        }
+    }
+
+    public func encode(to e: Encoder) throws {
+        var c = e.container(keyedBy: CodingKeys.self)
+        try c.encode(fullName, forKey: .fullName); try c.encode(owner, forKey: .owner)
+        try c.encode(name, forKey: .name); try c.encode(cloneURL, forKey: .cloneURL)
+        try c.encode(localPath, forKey: .localPath); try c.encode(mode, forKey: .mode)
+    }
 }
 
-/// Wires one drive's watcher -> debouncer -> syncer, plus a periodic pull.
+/// Wires one drive's watcher -> debouncers -> syncer, plus a periodic pull.
+///
+///                 file edited                 HEAD moved (a commit)      every 60s
+///   auto     ->   sync (3s quiet)             sync (3s quiet)            sync
+///   manual   ->   refresh local counts only   sync (1s quiet)            sync (pull-if-safe + push)
+///   paused   ->   refresh local counts only   refresh local counts       —
+///
+/// In manual mode a file edit never causes network traffic or a write; only your commits do.
 public final class DriveSession {
     public let drive: PluggedDrive
     public let syncer: RepoSyncer
     private let watcher: FolderWatcher
-    private var debouncer: Debouncer!
+    private var syncSoon: Debouncer!
+    private var syncPromptly: Debouncer!
+    private var refreshLocal: Debouncer!
     private var timer: DispatchSourceTimer?
     public var pollInterval: TimeInterval = 60
 
     init(drive: PluggedDrive, git: Git) {
         self.drive = drive
-        self.syncer = RepoSyncer(git: git)
+        self.syncer = RepoSyncer(git: git, mode: drive.mode)
         self.watcher = makeWatcher(for: drive.url)
-        self.debouncer = Debouncer { [weak self] in self?.syncer.requestSync() }
+        self.syncSoon = Debouncer(quiet: 3, maxWait: 30) { [weak self] in self?.syncer.requestSync() }
+        self.syncPromptly = Debouncer(quiet: 1, maxWait: 5) { [weak self] in self?.syncer.requestSync() }
+        self.refreshLocal = Debouncer(quiet: 0.5, maxWait: 3) { [weak self] in self?.syncer.requestLocalRefresh() }
     }
 
     func start() {
-        guard drive.autoSync else { return }
-        watcher.start { [weak self] in self?.debouncer.poke() }
-        let t = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
-        t.schedule(deadline: .now() + pollInterval, repeating: pollInterval, leeway: .seconds(10))
-        t.setEventHandler { [weak self] in self?.syncer.requestSync() }
-        t.resume()
-        timer = t
-        syncer.requestSync() // catch up on anything that happened while we weren't running
+        let mode = drive.mode
+        watcher.start { [weak self] kind in
+            guard let self else { return }
+            switch (mode, kind) {
+            case (.auto, _): self.syncSoon.poke()
+            case (.manual, .head): self.syncPromptly.poke()
+            case (.manual, .workingTree), (.paused, _): self.refreshLocal.poke()
+            }
+        }
+        if mode != .paused {
+            let t = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+            t.schedule(deadline: .now() + pollInterval, repeating: pollInterval, leeway: .seconds(10))
+            t.setEventHandler { [weak self] in self?.syncer.requestSync() }
+            t.resume()
+            timer = t
+            syncer.requestSync() // catch up on anything that happened while we weren't running
+        } else {
+            syncer.requestSync() // reports "paused" + local counts, touches nothing
+        }
     }
 
     func stop() {
         watcher.stop()
-        debouncer.cancel()
+        syncSoon.cancel(); syncPromptly.cancel(); refreshLocal.cancel()
         timer?.cancel()
         timer = nil
     }
 
     public func syncNow() { syncer.requestSync() }
+
+    /// Manual mode's one-click commit: commits what you staged, or everything if nothing is staged
+    /// (minus anything the Gatekeeper holds back), then syncs.
+    public func commitAndSync() { syncer.requestSync(commitNow: true) }
 }
 
 public enum DriveError: Error, CustomStringConvertible {
@@ -73,6 +128,7 @@ public final class DriveManager: @unchecked Sendable {
 
     public var onStatus: ((String, SyncStatus) -> Void)?
     public var onReport: ((String, SyncReport) -> Void)?
+    public var onLocalState: ((String, LocalState) -> Void)?
 
     private let storeURL: URL
     private let lock = NSLock()
@@ -132,7 +188,8 @@ public final class DriveManager: @unchecked Sendable {
         }
 
         let drive = PluggedDrive(fullName: remote.fullName, owner: remote.owner, name: remote.name,
-                                 cloneURL: remote.cloneURL, localPath: folder.path, autoSync: remote.canWrite)
+                                 cloneURL: remote.cloneURL, localPath: folder.path,
+                                 mode: remote.canWrite && !remote.archived ? .auto : .manual)
         lock.lock()
         drives.removeAll { $0.fullName == drive.fullName }
         drives.append(drive)
@@ -158,15 +215,29 @@ public final class DriveManager: @unchecked Sendable {
         save()
         lock.unlock()
 
+        // Only ever delete a folder whose every byte is on GitHub. In manual mode, eject pushes your
+        // commits but never commits for you, so uncommitted work keeps the folder alive.
         let clean: Bool = {
-            if case .idle = final.status, final.heldBack.isEmpty { return true }
-            return false
+            guard case .idle = final.status, final.heldBack.isEmpty else { return false }
+            return final.local.uncommitted == 0 && final.local.ahead == 0
         }()
         if removeLocalCopy && clean { try? FileManager.default.removeItem(at: session.drive.url) }
         return final
     }
 
     public func syncNow(_ fullName: String) { sessions[fullName]?.syncNow() }
+    public func commitAndSync(_ fullName: String) { sessions[fullName]?.commitAndSync() }
+
+    /// Switches a drive's mode. Takes effect immediately; persisted.
+    public func setMode(_ mode: SyncMode, for fullName: String) {
+        lock.lock()
+        guard let i = drives.firstIndex(where: { $0.fullName == fullName }) else { lock.unlock(); return }
+        drives[i].mode = mode
+        let drive = drives[i]
+        save()
+        lock.unlock()
+        if FileManager.default.fileExists(atPath: drive.localPath) { startSession(drive) }
+    }
 
     private func startSession(_ drive: PluggedDrive) {
         sessions[drive.fullName]?.stop()
@@ -177,6 +248,7 @@ public final class DriveManager: @unchecked Sendable {
         let id = drive.fullName
         session.syncer.onStatus = { [weak self] s in self?.onStatus?(id, s) }
         session.syncer.onReport = { [weak self] r in self?.onReport?(id, r) }
+        session.syncer.onLocalState = { [weak self] l in self?.onLocalState?(id, l) }
         sessions[id] = session
         session.start()
     }

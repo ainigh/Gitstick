@@ -3,11 +3,27 @@ import Foundation
 import CoreServices
 #endif
 
-/// Notifies when something in a folder changed. Ignores the .git directory, because our own
-/// commits write there and would otherwise trigger an endless sync loop.
+/// What kind of thing changed.
+public enum ChangeKind: Sendable {
+    /// A file in the folder (not inside .git) was created, edited, moved, or deleted.
+    case workingTree
+    /// HEAD moved: someone committed, checked out, merged… (seen via .git/logs/HEAD).
+    /// Manual mode uses this to push your commits promptly. Gitstick's own commits also
+    /// trigger it, but a follow-up cycle with nothing to do changes nothing, so it converges.
+    case head
+}
+
+/// Notifies when something in a folder changed. Everything inside .git is ignored except
+/// .git/logs/HEAD, which is reported separately as `.head`.
 public protocol FolderWatcher: AnyObject {
-    func start(onChange: @escaping () -> Void)
+    func start(onChange: @escaping (ChangeKind) -> Void)
     func stop()
+}
+
+func classify(path: String) -> ChangeKind? {
+    if path.hasSuffix("/.git/logs/HEAD") { return .head }
+    if path.contains("/.git/") || path.hasSuffix("/.git") { return nil }
+    return .workingTree
 }
 
 public func makeWatcher(for root: URL) -> FolderWatcher {
@@ -61,11 +77,11 @@ public final class Debouncer: @unchecked Sendable {
 public final class FSEventsWatcher: FolderWatcher {
     let root: URL
     private var stream: FSEventStreamRef?
-    private var onChange: (() -> Void)?
+    private var onChange: ((ChangeKind) -> Void)?
 
     public init(root: URL) { self.root = root.resolvingSymlinksInPath() }
 
-    public func start(onChange: @escaping () -> Void) {
+    public func start(onChange: @escaping (ChangeKind) -> Void) {
         stop()
         self.onChange = onChange
         var context = FSEventStreamContext(
@@ -75,8 +91,8 @@ public final class FSEventsWatcher: FolderWatcher {
             guard let info else { return }
             let me = Unmanaged<FSEventsWatcher>.fromOpaque(info).takeUnretainedValue()
             let list = unsafeBitCast(paths, to: NSArray.self) as? [String] ?? []
-            let relevant = list.prefix(count).contains { !$0.contains("/.git/") && !$0.hasSuffix("/.git") }
-            if relevant { me.onChange?() }
+            let kinds = Set(list.prefix(count).compactMap(classify(path:)))
+            for kind in kinds { me.onChange?(kind) }
         }
         let flags = UInt32(kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagNoDefer | kFSEventStreamCreateFlagUseCFTypes)
         stream = FSEventStreamCreate(nil, callback, &context, [root.path] as CFArray,
@@ -105,6 +121,7 @@ public final class PollingWatcher: FolderWatcher {
     let interval: TimeInterval
     private var timer: DispatchSourceTimer?
     private var last: [String: Date] = [:]
+    private var lastHead: Date?
 
     public init(root: URL, interval: TimeInterval = 2) {
         self.root = root
@@ -122,15 +139,23 @@ public final class PollingWatcher: FolderWatcher {
         return out
     }
 
-    public func start(onChange: @escaping () -> Void) {
+    func headStamp() -> Date? {
+        let url = root.appendingPathComponent(".git/logs/HEAD")
+        return (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
+    }
+
+    public func start(onChange: @escaping (ChangeKind) -> Void) {
         stop()
         last = snapshot()
+        lastHead = headStamp()
         let t = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "gitstick.poll"))
         t.schedule(deadline: .now() + interval, repeating: interval)
         t.setEventHandler { [weak self] in
             guard let self else { return }
             let now = self.snapshot()
-            if now != self.last { self.last = now; onChange() }
+            if now != self.last { self.last = now; onChange(.workingTree) }
+            let head = self.headStamp()
+            if head != self.lastHead { self.lastHead = head; onChange(.head) }
         }
         t.resume()
         timer = t

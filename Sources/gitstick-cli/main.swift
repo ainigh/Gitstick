@@ -2,16 +2,28 @@ import Foundation
 import GitstickCore
 
 // Headless front-end to the same engine the menubar app uses.
-//   gitstick sync  [path]   one sync cycle
-//   gitstick watch [path]   keep a folder synced until Ctrl-C
-//   gitstick pcs            list your PCs and drives on GitHub
+//   gitstick sync   [--manual] [path]   one sync cycle
+//   gitstick watch  [--manual] [path]   keep a folder synced until Ctrl-C
+//   gitstick commit [path]              manual mode's "Commit & Sync"
+//   gitstick status [path]              local counts, no network
+//   gitstick pcs                        list your PCs and drives on GitHub
 
 setvbuf(stdout, nil, _IOLBF, 0)
 
-let args = Array(CommandLine.arguments.dropFirst())
+var args = Array(CommandLine.arguments.dropFirst())
+let manual = args.contains("--manual")
+args.removeAll { $0 == "--manual" }
 let command = args.first ?? "help"
 let path = URL(fileURLWithPath: args.dropFirst().first ?? FileManager.default.currentDirectoryPath)
 let tokens = TokenProvider()
+
+func describe(_ l: LocalState) -> String {
+    var bits: [String] = []
+    if l.uncommitted > 0 { bits.append("\(l.uncommitted) uncommitted (\(l.staged) staged)") }
+    if l.ahead > 0 { bits.append("\(l.ahead) to push") }
+    if l.behind > 0 { bits.append("\(l.behind) to pull") }
+    return bits.isEmpty ? "clean" : bits.joined(separator: ", ")
+}
 
 func describe(_ r: SyncReport) -> String {
     var lines: [String] = []
@@ -24,25 +36,39 @@ func describe(_ r: SyncReport) -> String {
     case .idle: lines.append("● in sync")
     case .syncing: lines.append("… syncing")
     case .paused(let why): lines.append("⏸ paused: \(why)")
+    case .waiting(let why): lines.append("⏳ \(why)")
     case .divertedTo(let b): lines.append("↪︎ branch is protected; your work is on '\(b)'")
     case .error(let e): lines.append("✗ \(e)")
     }
+    lines.append("  local: \(describe(r.local))")
     return lines.joined(separator: "\n")
 }
 
+func syncer() -> RepoSyncer { RepoSyncer(git: Git(repo: path, credentials: tokens), mode: manual ? .manual : .auto) }
+
 switch command {
 case "sync":
-    let syncer = RepoSyncer(git: Git(repo: path, credentials: tokens))
-    print(describe(syncer.syncOnce()))
+    print(describe(syncer().syncOnce()))
+
+case "commit":
+    let s = RepoSyncer(git: Git(repo: path, credentials: tokens), mode: .manual)
+    print(describe(s.syncOnce(commitNow: true)))
+
+case "status":
+    do { print(describe(try syncer().localState())) } catch { print("✗ \(error)") }
 
 case "watch":
-    let syncer = RepoSyncer(git: Git(repo: path, credentials: tokens))
-    syncer.onReport = { r in print("[\(Date())]\n" + describe(r)) }
+    let s = syncer()
+    s.onReport = { r in print("[\(Date())]\n" + describe(r)) }
+    s.onLocalState = { l in if manual { print("  local: \(describe(l))") } }
     let watcher = makeWatcher(for: path)
-    let debouncer = Debouncer { syncer.requestSync() }
-    watcher.start { debouncer.poke() }
-    syncer.requestSync()
-    print("Watching \(path.path) — Ctrl-C to stop")
+    let soon = Debouncer { s.requestSync() }
+    let local = Debouncer(quiet: 0.5, maxWait: 3) { s.requestLocalRefresh() }
+    watcher.start { kind in
+        if !manual || kind == .head { soon.poke() } else { local.poke() }
+    }
+    s.requestSync()
+    print("Watching \(path.path) in \(manual ? "manual" : "auto") mode — Ctrl-C to stop")
     dispatchMain()
 
 case "pcs":
@@ -60,8 +86,10 @@ case "pcs":
 
 default:
     print("""
-    gitstick sync  [path]   run one sync cycle on a repo folder
-    gitstick watch [path]   keep a repo folder synced (Ctrl-C to stop)
-    gitstick pcs            list your GitHub accounts/orgs and their repos
+    gitstick sync   [--manual] [path]   run one sync cycle on a repo folder
+    gitstick watch  [--manual] [path]   keep a repo folder synced (Ctrl-C to stop)
+    gitstick commit [path]              commit (staged, or everything) with a generated message, then sync
+    gitstick status [path]              uncommitted / ahead / behind, no network
+    gitstick pcs                        list your GitHub accounts/orgs and their repos
     """)
 }

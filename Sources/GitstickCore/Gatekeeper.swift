@@ -1,7 +1,7 @@
 import Foundation
 
 /// Why a file was held back from an auto-commit.
-public enum HoldReason: Equatable, CustomStringConvertible {
+public enum HoldReason: Equatable, Sendable, CustomStringConvertible {
     case looksLikeSecret(String)
     case tooLarge(bytes: Int64)
 
@@ -13,7 +13,7 @@ public enum HoldReason: Equatable, CustomStringConvertible {
     }
 }
 
-public struct HeldFile: Equatable {
+public struct HeldFile: Equatable, Sendable {
     public let path: String
     public let reason: HoldReason
 }

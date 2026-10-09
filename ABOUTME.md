@@ -6,6 +6,7 @@ Your GitHub repos as drives in the Mac menubar. Plug one in, drop files in the f
 - **Drives** are repos. Plugging one in creates `~/Gitstick/<pc>/<drive>`, a normal folder that works in Finder, VS Code, and everything else.
 - **Conflicts** never block you: both versions are kept, side by side.
 - **Secrets and huge files** are held back and flagged, never pushed.
+- **Three modes per drive.** *Auto*: drop and go. *Manual*: you commit (or click **Commit & Sync**), and Gitstick pulls when it's safe and pushes your commits. *Paused*: hands off.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for how the engine works and the rules it never breaks.
 
@@ -32,8 +33,10 @@ The same engine powers a small CLI, which is handy for trying it on an existing 
 
 ```bash
 swift run gitstick pcs              # list your PCs and drives
-swift run gitstick sync  ~/code/x   # one sync cycle
-swift run gitstick watch ~/code/x   # keep a folder synced until Ctrl-C
+swift run gitstick sync   ~/code/x            # one sync cycle (auto mode)
+swift run gitstick watch  --manual ~/code/x   # keep synced; you commit, it pulls/pushes
+swift run gitstick commit ~/code/x            # "Commit & Sync": staged files, or everything
+swift run gitstick status ~/code/x            # uncommitted / to push / to pull, no network
 ```
 
 ## Tests
@@ -42,14 +45,13 @@ swift run gitstick watch ~/code/x   # keep a folder synced until Ctrl-C
 swift test
 ```
 
-The tests simulate two Macs sharing one "GitHub" (a bare repo on disk) and check the invariants: drop-and-go, keep-both conflicts, edit-beats-delete, independent changes merging, the Gatekeeper, backing off during a manual merge, and retrying when someone else pushes first. The engine and tests also build on Linux, so they can run in CI.
+The tests simulate two Macs sharing one "GitHub" (a bare repo on disk) and check the invariants: drop-and-go, keep-both conflicts, edit-beats-delete, independent changes merging, the Gatekeeper, backing off during a manual merge, retrying when someone else pushes first, and manual mode's promises (never commits on its own, never touches your index, waits instead of overwriting your uncommitted work, honors your staging on Commit & Sync). The engine and tests also build on Linux, so they can run in CI.
 
 ## Roadmap ideas
 
 - Sign in with GitHub's OAuth device flow instead of pasting a token
 - Notifications for conflicts and held-back files (needs the bundled .app)
 - Auto-open a pull request when a protected branch diverts work
-- Per-drive "manual" mode that leaves staging to you
 - Launch at login (`SMAppService`)
 - Git LFS for large files
 - "Format new drive" (create a repo) and branch picker

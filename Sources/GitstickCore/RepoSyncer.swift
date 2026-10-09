@@ -1,36 +1,62 @@
 import Foundation
 
-public enum SyncStatus: Equatable {
+/// How much Gitstick does on a drive.
+public enum SyncMode: String, Codable, CaseIterable, Sendable {
+    /// Gitstick commits everything, pulls, merges, pushes. Drop files and walk away.
+    case auto
+    /// You commit (VS Code, terminal, or one-click "Commit & Sync"). Gitstick never touches your
+    /// working tree or index on its own; it only pulls when that's safe and pushes your commits.
+    case manual
+    /// Gitstick does nothing to the repo. Status is still shown.
+    case paused
+}
+
+public enum SyncStatus: Equatable, Sendable {
     case idle(lastSync: Date?)
     case syncing
-    /// Someone (the user, VS Code, a terminal) is mid-operation in this repo. We wait.
+    /// A human or tool is mid-operation in this repo, or sync is switched off. We wait.
     case paused(String)
+    /// Remote changes are ready but pulling them now would touch your uncommitted work.
+    /// Nothing was changed; the next cycle after you commit/clean up will pull them.
+    case waiting(String)
     /// Branch is protected / read-only: local work is safe on a side branch.
     case divertedTo(branch: String)
     case error(String)
 }
 
-public struct SyncReport: Equatable {
-    public var committed: String? = nil          // subject of the auto-commit, if any
+/// What's going on in the folder right now. Cheap to compute, refreshed on every file change.
+public struct LocalState: Equatable, Sendable {
+    public var uncommitted = 0   // changed / new / deleted files not yet committed (incl. staged)
+    public var staged = 0        // of which staged
+    public var ahead = 0         // local commits not on GitHub yet
+    public var behind = 0        // GitHub commits not here yet (as of the last fetch)
+    public init() {}
+}
+
+public struct SyncReport: Equatable, Sendable {
+    public var committed: String? = nil          // subject of the commit Gitstick made, if any
     public var pulled = false                     // remote changes were integrated
     public var pushed = false
     public var conflictCopies: [String] = []
     public var heldBack: [HeldFile] = []
+    public var local = LocalState()
     public var status: SyncStatus = .idle(lastSync: nil)
 }
 
 /// One plugged-in drive's sync engine.
 ///
-/// The cycle is always the same, and always in this order:
-///
-///     guard  ->  snapshot (commit local)  ->  fetch  ->  integrate (merge, keep-both)  ->  push
+///     guard  ->  snapshot  ->  fetch  ->  integrate (merge, keep-both)  ->  push
+///                 (auto, or
+///               "Commit & Sync")
 ///
 /// Invariants (see ARCHITECTURE.md):
-///  1. Local work is committed BEFORE anything remote touches the working tree.
+///  1. Gitstick's own commits happen BEFORE anything remote touches the working tree.
 ///  2. Nothing ever prompts. Every decision has a default.
-///  3. Never rewrite published history: no force-push, no rebase of pushed commits.
+///  3. Never rewrite published history: no force-push, no rebase, no amend.
 ///  4. If a human is operating git in this repo, back off.
 ///  5. Cycles are serialized per repo; requests during a cycle coalesce into one follow-up.
+///  10. Manual mode: Gitstick never commits on its own, never alters your index, and only merges
+///      when git can do so without touching any uncommitted file. Otherwise: `.waiting`.
 public final class RepoSyncer: @unchecked Sendable {
     public let git: Git
     public var gatekeeper = Gatekeeper()
@@ -38,17 +64,26 @@ public final class RepoSyncer: @unchecked Sendable {
     public var remote = "origin"
     public var maxPushAttempts = 3
 
+    public var mode: SyncMode {
+        get { lock.lock(); defer { lock.unlock() }; return _mode }
+        set { lock.lock(); _mode = newValue; lock.unlock() }
+    }
+
     public var onStatus: ((SyncStatus) -> Void)?
     public var onReport: ((SyncReport) -> Void)?
+    public var onLocalState: ((LocalState) -> Void)?
 
     private let queue: DispatchQueue
+    private let lock = NSLock()
+    private var _mode: SyncMode
     private var running = false
     private var pending = false
-    private let lock = NSLock()
+    private var wantCommit = false
     public private(set) var lastSync: Date?
 
-    public init(git: Git, deviceName: String = RepoSyncer.defaultDeviceName) {
+    public init(git: Git, mode: SyncMode = .auto, deviceName: String = RepoSyncer.defaultDeviceName) {
         self.git = git
+        self._mode = mode
         self.deviceName = deviceName
         self.queue = DispatchQueue(label: "gitstick.sync.\(git.repo.lastPathComponent)", qos: .utility)
     }
@@ -64,8 +99,10 @@ public final class RepoSyncer: @unchecked Sendable {
     // MARK: Scheduling
 
     /// Fire-and-forget. Coalesces: many requests during a running cycle => exactly one more cycle.
-    public func requestSync() {
+    /// `commitNow` is the one-click "Commit & Sync" of manual mode; it is sticky until a cycle runs it.
+    public func requestSync(commitNow: Bool = false) {
         lock.lock()
+        if commitNow { wantCommit = true }
         if running { pending = true; lock.unlock(); return }
         running = true
         lock.unlock()
@@ -73,10 +110,17 @@ public final class RepoSyncer: @unchecked Sendable {
         queue.async { [weak self] in
             guard let self else { return }
             while true {
-                let report = self.syncOnce()
-                self.onReport?(report)
                 self.lock.lock()
-                if self.pending { self.pending = false; self.lock.unlock(); continue }
+                let commit = self.wantCommit
+                self.wantCommit = false
+                self.pending = false
+                self.lock.unlock()
+
+                let report = self.syncOnce(commitNow: commit)
+                self.onReport?(report)
+
+                self.lock.lock()
+                if self.pending { self.lock.unlock(); continue }
                 self.running = false
                 self.lock.unlock()
                 break
@@ -84,26 +128,51 @@ public final class RepoSyncer: @unchecked Sendable {
         }
     }
 
+    /// Recomputes LocalState only (no network, no writes). Used on every file change in manual mode.
+    public func requestLocalRefresh() {
+        queue.async { [weak self] in
+            guard let self, let state = try? self.localState() else { return }
+            self.onLocalState?(state)
+        }
+    }
+
     // MARK: The cycle
 
     /// One full cycle, synchronously. Never throws: failures become a status.
+    /// `commitNow` makes Gitstick commit even in manual mode (respecting what you staged).
     @discardableResult
-    public func syncOnce() -> SyncReport {
-        var report = SyncReport()
+    public func syncOnce(commitNow: Bool = false) -> SyncReport {
         onStatus?(.syncing)
+        var report = cycle(commitNow: commitNow)
+        report.local = (try? localState()) ?? report.local
+        onLocalState?(report.local)
+        onStatus?(report.status)
+        return report
+    }
+
+    private func cycle(commitNow: Bool) -> SyncReport {
+        var report = SyncReport()
+        let mode = self.mode
+        if mode == .paused {
+            report.status = .paused("Sync is off for this drive")
+            return report
+        }
         do {
             if let reason = humanActivity() {
                 report.status = .paused(reason)
-            } else {
-                try gatekeeper.installExcludes(gitDir: git.gitDir)
-                guard let branch = currentBranch() else {
-                    report.status = .paused("Not on a branch (detached HEAD)")
-                    onStatus?(report.status)
-                    return report
-                }
-                try snapshot(into: &report)
-                report.status = try exchange(branch: branch, report: &report)
+                return report
             }
+            try gatekeeper.installExcludes(gitDir: git.gitDir)
+            guard let branch = currentBranch() else {
+                report.status = .paused("Not on a branch (detached HEAD)")
+                return report
+            }
+            if mode == .auto {
+                try snapshot(respectStaging: false, into: &report)
+            } else if commitNow {
+                try snapshot(respectStaging: true, into: &report)
+            }
+            report.status = try exchange(branch: branch, report: &report)
         } catch {
             // A failed merge must never leave the tree half-merged for the next cycle.
             abortIntegrationIfNeeded()
@@ -113,13 +182,18 @@ public final class RepoSyncer: @unchecked Sendable {
             lastSync = Date()
             report.status = .idle(lastSync: lastSync)
         }
-        onStatus?(report.status)
         return report
     }
 
-    /// Step 1 — commit everything local (except what the gatekeeper holds back).
-    func snapshot(into report: inout SyncReport) throws {
-        try git.run(["add", "-A"])
+    /// Step 1 — commit local work (except what the gatekeeper holds back).
+    ///
+    /// `respectStaging`: if you staged something, commit exactly that; otherwise commit everything.
+    /// That's how "Commit & Sync" behaves in manual mode — your staging is a decision, honor it.
+    func snapshot(respectStaging: Bool, into report: inout SyncReport) throws {
+        let hasStaged = !(try git.run(["diff", "--cached", "--quiet"], allowFailure: true).ok)
+        if !(respectStaging && hasStaged) {
+            try git.run(["add", "-A"])
+        }
         var staged = parseNameStatusZ(try git.run(["diff", "--cached", "--name-status", "-z"]).stdoutData)
 
         // Hold back anything risky: unstage it, keep it on disk, report it.
@@ -156,7 +230,7 @@ public final class RepoSyncer: @unchecked Sendable {
             let remoteExists = git.value(["rev-parse", "--verify", "-q", remoteRef]) != nil
 
             if remoteExists {
-                try integrate(remoteRef: remoteRef, report: &report)
+                if let wait = try integrate(remoteRef: remoteRef, report: &report) { return wait }
             }
 
             guard hasCommits() else { return .idle(lastSync: nil) }
@@ -175,32 +249,63 @@ public final class RepoSyncer: @unchecked Sendable {
     }
 
     /// Merge remote into local. Fast-forward when possible; otherwise merge commit with keep-both.
-    func integrate(remoteRef: String, report: inout SyncReport) throws {
+    /// Returns a `.waiting` status (having changed nothing) when merging now would touch work
+    /// that isn't committed.
+    func integrate(remoteRef: String, report: inout SyncReport) throws -> SyncStatus? {
         if !hasCommits() {
-            // Fresh clone of a repo whose local branch is unborn: adopt remote as-is.
-            try git.run(["reset", "-q", "--hard", remoteRef])
-            report.pulled = true
-            return
+            // Unborn local branch (fresh clone of an empty repo, or first pull).
+            // Only adopt the remote if nothing local would be overwritten.
+            let r = try git.run(["checkout", "-q", "-B", currentBranch() ?? "main", remoteRef], allowFailure: true)
+            if r.ok { report.pulled = true; return nil }
+            if let w = waitingStatus(fromMergeError: r.stderr, behind: 1) { return w }
+            throw SyncFailure(message: r.stderr)
         }
         let behind = Int(git.value(["rev-list", "--count", "HEAD..\(remoteRef)"]) ?? "0") ?? 0
-        guard behind > 0 else { return }
+        guard behind > 0 else { return nil }
+
+        // Our conflict resolution commits the index. If YOU have staged something (manual mode),
+        // that commit would swallow it. So: never merge over a non-empty index.
+        if !(try git.run(["diff", "--cached", "--quiet"], allowFailure: true).ok) {
+            return .waiting("\(Self.plural(behind, "change")) on GitHub — commit or unstage your staged files to pull")
+        }
 
         var mergeArgs = ["merge", "-q", "--no-edit", "--no-verify"]
         // Two Macs that each made the first commit into an empty repo have no common ancestor.
         // That's still the same drive, so join the histories (add/add collisions become keep-both).
         if git.value(["merge-base", "HEAD", remoteRef]) == nil { mergeArgs.append("--allow-unrelated-histories") }
         let merge = try git.run(mergeArgs + [remoteRef], allowFailure: true)
-        report.pulled = true
-        if merge.ok { return }
+        if merge.ok { report.pulled = true; return nil }
+
+        // Git refused before touching anything (it would overwrite uncommitted/untracked files).
+        if let w = waitingStatus(fromMergeError: merge.stderr + merge.stdout, behind: behind) { return w }
 
         let resolver = ConflictResolver(git: git, deviceName: deviceName)
         guard !(try resolver.conflictedPaths()).isEmpty else {
             throw SyncFailure(message: merge.stderr.isEmpty ? "Merge failed" : merge.stderr)
         }
+        report.pulled = true
         let copies = try resolver.resolveAll()
         report.conflictCopies += copies
         let note = copies.isEmpty ? "" : "\n\nKept both versions of:\n" + copies.map { "  \($0)" }.joined(separator: "\n")
         try git.run(["commit", "-q", "--no-verify", "-m", "Merge remote changes\(note)\n\n[gitstick]"])
+        return nil
+    }
+
+    /// Recognizes git's "your local changes would be overwritten" refusals, which leave the repo
+    /// untouched, and turns them into a friendly waiting state naming the files in the way.
+    func waitingStatus(fromMergeError text: String, behind: Int) -> SyncStatus? {
+        guard text.contains("would be overwritten") else { return nil }
+        let files = text.components(separatedBy: "\n")
+            .filter { $0.hasPrefix("\t") }
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+        let which: String
+        switch files.count {
+        case 0: which = "files you've changed"
+        case 1: which = files[0]
+        default: which = "\(files[0]) and \(files.count - 1) more"
+        }
+        let action = mode == .auto ? "move or rename" : "commit"
+        return .waiting("\(Self.plural(behind, "change")) on GitHub touch \(which) — \(action) to pull")
     }
 
     /// The branch refused us (protected / no write access). Put the work somewhere safe instead.
@@ -234,6 +339,29 @@ public final class RepoSyncer: @unchecked Sendable {
         return nil
     }
 
+    /// Working-tree / index / ahead-behind counts. Read-only (uses --no-optional-locks so it
+    /// never contends with VS Code or the terminal for index.lock).
+    public func localState() throws -> LocalState {
+        var s = LocalState()
+        let status = try git.run(["--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=all"])
+        let entries = status.stdoutData.split(separator: 0)
+        var skipNext = false
+        for e in entries {
+            if skipNext { skipNext = false; continue }
+            guard e.count >= 3 else { continue }
+            let x = Character(UnicodeScalar(e[e.startIndex]))
+            s.uncommitted += 1
+            if x != " " && x != "?" { s.staged += 1 }
+            if x == "R" || x == "C" { skipNext = true } // rename source path follows
+        }
+        if let branch = currentBranch(), git.value(["rev-parse", "--verify", "-q", "refs/remotes/\(remote)/\(branch)"]) != nil {
+            let counts = git.value(["rev-list", "--left-right", "--count", "HEAD...refs/remotes/\(remote)/\(branch)"])?
+                .split(whereSeparator: { $0 == "\t" || $0 == " " }).compactMap { Int($0) } ?? []
+            if counts.count == 2 { s.ahead = counts[0]; s.behind = counts[1] }
+        }
+        return s
+    }
+
     func abortIntegrationIfNeeded() {
         if FileManager.default.fileExists(atPath: git.gitDir.appendingPathComponent("MERGE_HEAD").path) {
             try? git.run(["merge", "--abort"], allowFailure: true)
@@ -246,6 +374,8 @@ public final class RepoSyncer: @unchecked Sendable {
     func isAhead(of ref: String) -> Bool {
         (Int(git.value(["rev-list", "--count", "\(ref)..HEAD"]) ?? "0") ?? 0) > 0
     }
+
+    static func plural(_ n: Int, _ word: String) -> String { n == 1 ? "1 \(word)" : "\(n) \(word)s" }
 
     // MARK: Errors
 

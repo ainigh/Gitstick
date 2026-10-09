@@ -122,7 +122,7 @@ struct MenuView: View {
     }
 }
 
-/// A drive that's plugged in: status + actions.
+/// A drive that's plugged in: status, mode, actions.
 struct PluggedRow: View {
     @EnvironmentObject var model: AppModel
     let drive: PluggedDrive
@@ -130,13 +130,17 @@ struct PluggedRow: View {
     var body: some View {
         let status = model.statuses[drive.fullName]
         let report = model.reports[drive.fullName]
-        VStack(alignment: .leading, spacing: 3) {
+        let local = model.local[drive.fullName] ?? LocalState()
+        VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 8) {
                 Circle().fill(status?.color ?? .gray).frame(width: 8, height: 8)
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(drive.name).font(.body)
-                    Text("\(drive.owner) · \(status?.label ?? (drive.autoSync ? "Starting…" : "Read-only"))")
-                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    HStack(spacing: 5) {
+                        Text(drive.name).font(.body)
+                        if drive.mode != .auto { ModeBadge(mode: drive.mode) }
+                    }
+                    Text("\(drive.owner) · \(status?.label ?? "Starting…")")
+                        .font(.caption).foregroundStyle(.secondary).lineLimit(2)
                 }
                 Spacer()
                 if model.busy.contains(drive.fullName) {
@@ -144,17 +148,28 @@ struct PluggedRow: View {
                 } else {
                     Button { model.reveal(drive.fullName) } label: { Image(systemName: "folder") }
                         .buttonStyle(.borderless).help("Show in Finder")
-                    Menu {
-                        Button("Show in Finder") { model.reveal(drive.fullName) }
-                        Button("Open in Editor") { model.openInEditor(drive.fullName) }
-                        Button("Open on GitHub") { model.openOnGitHub(drive.fullName) }
-                        Divider()
-                        Button("Sync Now") { model.syncNow(drive.fullName) }
-                        Button("Eject") { model.eject(drive.fullName) }
-                    } label: { Image(systemName: "ellipsis.circle") }
-                        .menuStyle(.borderlessButton).fixedSize()
+                    actions
                 }
             }
+
+            // Manual mode lives here: what's pending, and the one-click commit.
+            if drive.mode != .auto && (local.uncommitted > 0 || local.ahead > 0 || local.behind > 0) {
+                HStack(spacing: 8) {
+                    Text(Self.summary(local)).font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    if drive.mode == .manual && local.uncommitted > 0 {
+                        Button(local.staged > 0 ? "Commit Staged & Sync" : "Commit & Sync") {
+                            model.commitAndSync(drive.fullName)
+                        }
+                        .controlSize(.small)
+                        .help(local.staged > 0
+                              ? "Commits only the \(local.staged) staged file(s) with a generated message"
+                              : "Commits all changes with a generated message, then syncs")
+                    }
+                }
+                .padding(.leading, 16)
+            }
+
             if let report {
                 ForEach(report.heldBack, id: \.path) { h in
                     Text("✋ \(h.path) not synced: \(h.reason.description)")
@@ -168,6 +183,48 @@ struct PluggedRow: View {
         }
         .padding(8)
         .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.05)))
+    }
+
+    private var actions: some View {
+        Menu {
+            Button("Show in Finder") { model.reveal(drive.fullName) }
+            Button("Open in Editor") { model.openInEditor(drive.fullName) }
+            Button("Open on GitHub") { model.openOnGitHub(drive.fullName) }
+            Divider()
+            Picker("Mode", selection: Binding(
+                get: { drive.mode },
+                set: { model.setMode($0, for: drive.fullName) }
+            )) {
+                ForEach(SyncMode.allCases, id: \.self) { m in
+                    Text("\(m.title) — \(m.explanation)").tag(m)
+                }
+            }
+            Divider()
+            if drive.mode == .manual { Button("Commit & Sync") { model.commitAndSync(drive.fullName) } }
+            if drive.mode != .paused { Button("Sync Now") { model.syncNow(drive.fullName) } }
+            Button("Eject") { model.eject(drive.fullName) }
+        } label: { Image(systemName: "ellipsis.circle") }
+            .menuStyle(.borderlessButton).fixedSize()
+    }
+
+    static func summary(_ l: LocalState) -> String {
+        var bits: [String] = []
+        if l.uncommitted > 0 { bits.append(l.staged > 0 ? "\(l.uncommitted) changed (\(l.staged) staged)" : "\(l.uncommitted) changed") }
+        if l.ahead > 0 { bits.append("\(l.ahead) to push") }
+        if l.behind > 0 { bits.append("\(l.behind) to pull") }
+        return bits.joined(separator: " · ")
+    }
+}
+
+struct ModeBadge: View {
+    let mode: SyncMode
+    var body: some View {
+        Text(mode.title.uppercased())
+            .font(.system(size: 9, weight: .semibold))
+            .padding(.horizontal, 5).padding(.vertical, 1)
+            .background(Capsule().fill(mode == .paused ? Color.gray.opacity(0.25) : Color.accentColor.opacity(0.18)))
+            .foregroundStyle(mode == .paused ? Color.secondary : Color.accentColor)
+            .help(mode.explanation)
     }
 }
 

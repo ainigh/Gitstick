@@ -7,6 +7,7 @@ final class AppModel: ObservableObject {
     @Published var pcs: [PC] = []
     @Published var statuses: [String: SyncStatus] = [:]
     @Published var reports: [String: SyncReport] = [:]
+    @Published var local: [String: LocalState] = [:]
     @Published var signedInAs: String?
     @Published var loading = false
     @Published var message: String?
@@ -25,6 +26,9 @@ final class AppModel: ObservableObject {
         }
         manager.onReport = { [weak self] id, report in
             Task { @MainActor in self?.reports[id] = report }
+        }
+        manager.onLocalState = { [weak self] id, state in
+            Task { @MainActor in self?.local[id] = state }
         }
         plugged = manager.drives
         manager.startAll()
@@ -98,6 +102,13 @@ final class AppModel: ObservableObject {
     }
 
     func syncNow(_ id: String) { manager.syncNow(id) }
+    func commitAndSync(_ id: String) { manager.commitAndSync(id) }
+
+    func setMode(_ mode: SyncMode, for id: String) {
+        manager.setMode(mode, for: id)
+        plugged = manager.drives
+        reports[id] = nil
+    }
 
     func reveal(_ id: String) {
         guard let d = plugged.first(where: { $0.fullName == id }) else { return }
@@ -130,7 +141,9 @@ final class AppModel: ObservableObject {
             return "externaldrive.badge.exclamationmark"
         }
         if all.contains(.syncing) { return "arrow.triangle.2.circlepath" }
-        if all.contains(where: { if case .paused = $0 { return true }; return false }) {
+        if all.contains(where: {
+            switch $0 { case .paused, .waiting: return true; default: return false }
+        }) {
             return "externaldrive.badge.minus"
         }
         return plugged.isEmpty ? "externaldrive" : "externaldrive.badge.checkmark"
@@ -147,6 +160,7 @@ extension SyncStatus {
             return "Synced \(f.localizedString(for: d, relativeTo: Date()))"
         case .syncing: return "Syncing…"
         case .paused(let why): return "Paused — \(why)"
+        case .waiting(let why): return why
         case .divertedTo(let b): return "Read-only branch — saved to \(b)"
         case .error(let e): return e
         }
@@ -156,8 +170,26 @@ extension SyncStatus {
         switch self {
         case .idle: return .green
         case .syncing: return .blue
-        case .paused, .divertedTo: return .orange
+        case .paused: return .gray
+        case .waiting, .divertedTo: return .orange
         case .error: return .red
+        }
+    }
+}
+
+extension SyncMode {
+    var title: String {
+        switch self {
+        case .auto: return "Auto"
+        case .manual: return "Manual"
+        case .paused: return "Paused"
+        }
+    }
+    var explanation: String {
+        switch self {
+        case .auto: return "Commits, pulls and pushes everything for you"
+        case .manual: return "You commit; Gitstick pulls when safe and pushes your commits"
+        case .paused: return "Hands off — nothing is synced"
         }
     }
 }
