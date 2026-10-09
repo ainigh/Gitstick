@@ -84,13 +84,23 @@ case "watch":
     s.onReport = { r in print("[\(Date())]\n" + describe(r)) }
     s.onLocalState = { l in if manual { print("  local: \(describe(l))") } }
     let watcher = makeWatcher(for: path)
-    let soon = Debouncer { s.requestSync() }
+    let soon = Debouncer { s.requestSync() }                                  // a file edit: 3 s quiet, like the app
+    let promptly = Debouncer(quiet: 1, maxWait: 5) { s.requestSync() }        // your commit in manual mode: push it now
     let local = Debouncer(quiet: 0.5, maxWait: 3) { s.requestLocalRefresh() }
     watcher.start { kind in
-        if !manual || kind == .head { soon.poke() } else { local.poke() }
+        switch (manual, kind) {
+        case (false, _): soon.poke()
+        case (true, .head): promptly.poke()
+        case (true, .workingTree): local.poke()
+        }
     }
+    // Changes made on GitHub don't cause a file event here, so poll for them like the app does.
+    let poll = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+    poll.schedule(deadline: .now() + 60, repeating: 60, leeway: .seconds(10))
+    poll.setEventHandler { s.requestSync() }
+    poll.resume()
     s.requestSync()
-    print("Watching \(path.path) in \(manual ? "manual" : "auto") mode — Ctrl-C to stop")
+    print("Watching \(path.path) in \(manual ? "manual" : "auto") mode, checking GitHub every minute — Ctrl-C to stop")
     dispatchMain()
 
 case "pcs":

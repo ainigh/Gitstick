@@ -51,7 +51,7 @@ The same engine powers a small CLI, which is handy for trying it on an existing 
 ```bash
 swift run gitstick pcs              # list your PCs and drives
 swift run gitstick sync   ~/code/x            # one sync cycle (auto mode)
-swift run gitstick watch  --manual ~/code/x   # keep synced; you commit, it pulls/pushes
+swift run gitstick watch  --manual ~/code/x   # keep synced (checks GitHub every minute); you commit, it pulls/pushes
 swift run gitstick commit ~/code/x            # "Commit & Sync": staged files, or everything
 swift run gitstick sync   --review ~/code/x   # push yours; show GitHub's changes instead of merging them
 swift run gitstick accept ~/code/x            # …then bring them in (or `decline` to hold them off)
